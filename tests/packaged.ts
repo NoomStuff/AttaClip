@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { createServer } from "node:net";
+import sharp from "sharp";
 import { defaultPreferences } from "../src/shared/defaults";
 
 // This captures the selected screen. Windows uses the real desktop. The Linux
@@ -139,11 +140,12 @@ try {
    if (linux) {
       const frame = await promisify(execFile)(
          ffmpeg,
-         ["-v", "error", "-ss", "1", "-i", clip.path, "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+         ["-v", "error", "-ss", "1", "-i", clip.path, "-frames:v", "1", "-c:v", "png", "-threads", "1", "-f", "image2pipe", "-"],
          { encoding: "buffer", maxBuffer: 4 * 1024 * 1024 }
       );
-      assert(frame.stdout.length > 0, "The packaged capture must decode real pixels");
-      const mean = frame.stdout.reduce((sum, value) => sum + value, 0) / frame.stdout.length;
+      const pixels = await sharp(frame.stdout).greyscale().raw().toBuffer();
+      assert(pixels.length > 0, "The packaged capture must decode real pixels");
+      const mean = pixels.reduce((sum, value) => sum + value, 0) / pixels.length;
       assert(mean > 10, "The packaged X11 fixture must appear in the captured frame");
       for (const track of [0, 1]) {
          const audio = await promisify(execFile)(ffmpeg, ["-hide_banner", "-i", clip.path, "-map", `0:a:${track}`, "-af", "volumedetect", "-f", "null", "-"]);
