@@ -6,4 +6,3 @@ endif()
 add_executable(attaclip-d3d-fixture d3d-window.cpp)
 target_link_libraries(attaclip-d3d-fixture PRIVATE d3d11 dxgi user32)
 target_compile_definitions(attaclip-d3d-fixture PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-

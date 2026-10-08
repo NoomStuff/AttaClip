@@ -13,6 +13,7 @@
 #include <thread>
 #include <unordered_map>
 #include <util/platform.h>
+#include <vector>
 #include <xcb/composite.h>
 #include <xcb/xcb.h>
 
@@ -22,7 +23,8 @@ struct Availability {
 };
 std::mutex availabilityMutex;
 std::unordered_map<xcb_window_t, std::shared_ptr<Availability>> availability;
-bool supportedVisual(xcb_connection_t *connection, xcb_visualid_t visual) {
+bool supportedVisual(xcb_connection_t *connection, xcb_visualid_t visual,
+                     bool &direct) {
   auto screens = xcb_setup_roots_iterator(xcb_get_setup(connection));
   for (; screens.rem; xcb_screen_next(&screens)) {
     auto depths = xcb_screen_allowed_depths_iterator(screens.data);
@@ -30,11 +32,12 @@ bool supportedVisual(xcb_connection_t *connection, xcb_visualid_t visual) {
       auto visuals = xcb_depth_visuals_iterator(depths.data);
       for (; visuals.rem; xcb_visualtype_next(&visuals)) {
         auto *value = visuals.data;
-        if (value->visual_id == visual) blog(LOG_WARNING, "X11 compatibility visual class=%u masks=%x/%x/%x", value->_class, value->red_mask, value->green_mask, value->blue_mask);
-        if (value->visual_id == visual)
-          return value->_class == XCB_VISUAL_CLASS_TRUE_COLOR &&
+        if (value->visual_id == visual) {
+          direct = value->_class == XCB_VISUAL_CLASS_DIRECT_COLOR;
+          return (value->_class == XCB_VISUAL_CLASS_TRUE_COLOR || direct) &&
                  value->red_mask == 0xff0000 && value->green_mask == 0xff00 &&
                  value->blue_mask == 0xff;
+        }
       }
     }
   }
@@ -80,6 +83,7 @@ struct Source {
     }
     xcb_pixmap_t pixmap = 0;
     uint16_t width = 0, height = 0;
+    std::vector<uint8_t> converted;
     int interval = 1000000 / std::clamp(fps, 1, 120);
     while (!quit) {
       auto start = std::chrono::steady_clock::now();
@@ -87,8 +91,10 @@ struct Source {
           connection, xcb_get_window_attributes(connection, window), nullptr);
       bool viewable =
           attributes && attributes->map_state == XCB_MAP_STATE_VIEWABLE;
+      bool direct = false;
       bool visual =
-          attributes && supportedVisual(connection, attributes->visual);
+          attributes && supportedVisual(connection, attributes->visual, direct);
+      auto colormap = attributes ? attributes->colormap : XCB_COLORMAP_NONE;
       free(attributes);
       auto *geometry =
           viewable
@@ -134,8 +140,37 @@ struct Source {
             frame.data[0] = xcb_get_image_data(image);
             frame.linesize[0] = uint32_t(bytes / height);
             frame.timestamp = os_gettime_ns();
-            obs_source_output_video(source, &frame);
-            state->lastFrame = frame.timestamp;
+            bool colorsValid = true;
+            if (direct) {
+              uint32_t pixels[256];
+              for (uint32_t i = 0; i < 256; i++)
+                pixels[i] = i | (i << 8) | (i << 16);
+              auto *colors = xcb_query_colors_reply(
+                  connection,
+                  xcb_query_colors(connection, colormap, 256, pixels), nullptr);
+              colorsValid =
+                  colors && xcb_query_colors_colors_length(colors) == 256;
+              if (colorsValid) {
+                auto *lookup = xcb_query_colors_colors(colors);
+                converted.resize(size_t(width) * height * 4);
+                for (size_t y = 0; y < height; y++)
+                  for (size_t x = 0; x < width; x++) {
+                    auto *input = frame.data[0] + y * frame.linesize[0] + x * 4;
+                    auto *output = converted.data() + (y * width + x) * 4;
+                    output[0] = uint8_t(lookup[input[0]].blue / 257);
+                    output[1] = uint8_t(lookup[input[1]].green / 257);
+                    output[2] = uint8_t(lookup[input[2]].red / 257);
+                    output[3] = 255;
+                  }
+                frame.data[0] = converted.data();
+                frame.linesize[0] = uint32_t(width) * 4;
+              }
+              free(colors);
+            }
+            if (colorsValid) {
+              obs_source_output_video(source, &frame);
+              state->lastFrame = frame.timestamp;
+            }
           }
           free(image);
         }
