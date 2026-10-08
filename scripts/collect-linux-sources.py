@@ -5,7 +5,8 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shutil
 import subprocess
@@ -144,7 +145,7 @@ def match_member(data, filename, expected):
                     raise ValueError("Circular package symlink")
                 seen.add(member.name)
                 link = member.linkname
-                key = os.path.normpath(str(Path(member.name).parent / link)) if member.issym() and not link.startswith("/") else link.lstrip("/")
+                key = posixpath.normpath(str(PurePosixPath(member.name).parent / link)) if member.issym() and not link.startswith("/") else link.lstrip("/")
                 member = members.get(key.removeprefix("./"))
                 if not member:
                     break

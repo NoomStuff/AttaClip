@@ -18,7 +18,7 @@ const pins = {
 export async function collectElectronFfmpeg(
    project: string,
    directory: string,
-   options: { platform?: "win32" | "linux"; binaryArchive?: string; sourceCache?: string } = {}
+   options: { platform?: "win32" | "linux" | "darwin"; arch?: "x64" | "arm64"; binaryArchive?: string; sourceCache?: string } = {}
 ): Promise<{
    id: string;
    version: string;
@@ -30,9 +30,20 @@ export async function collectElectronFfmpeg(
    const version = (JSON.parse(await readFile(path.join(project, "node_modules/electron/package.json"), "utf8")) as { version: string }).version;
    if (version !== pins.electronVersion) throw new Error("Electron changed. Review its Chromium FFmpeg source pins before release.");
    const platform = options.platform ?? "win32";
-   const configPlatform = platform === "win32" ? "win" : "linux";
-   const moduleName = platform === "win32" ? "ffmpeg.dll" : "libffmpeg.so";
-   const folder = path.join(directory, "evidence", platform === "win32" ? "electron-ffmpeg" : "electron-ffmpeg-linux");
+   const arch = options.arch ?? "x64";
+   if (arch === "arm64" && platform !== "darwin") throw new Error("Only macOS arm64 and Windows/Linux x64 source configurations are reviewed.");
+   const configPlatform = platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux";
+   const moduleName =
+      platform === "win32"
+         ? "ffmpeg.dll"
+         : platform === "linux"
+           ? "libffmpeg.so"
+           : "Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib";
+   const folder = path.join(
+      directory,
+      "evidence",
+      platform === "win32" ? "electron-ffmpeg" : platform === "linux" ? "electron-ffmpeg-linux" : `electron-ffmpeg-darwin-${arch}`
+   );
    await mkdir(folder, { recursive: true });
    const record = async (file: string): Promise<FileRecord> => ({
       path: path.relative(directory, file).replaceAll("\\", "/"),
@@ -93,18 +104,18 @@ export async function collectElectronFfmpeg(
          licenseFiles.push(await record(target));
       }
       if (name === "chromium-ffmpeg") {
-         const configName = members.find((member) => member === `chromium/config/Chrome/${configPlatform}/x64/config.h`);
+         const configName = members.find((member) => member === `chromium/config/Chrome/${configPlatform}/${arch}/config.h`);
          if (!configName) throw new Error(`Chromium ${platform} Chrome FFmpeg configuration is missing.`);
          const config = execFileSync("tar", ["-xOf", file, configName], { encoding: "utf8", windowsHide: true });
          if (!/^#define CONFIG_GPL 0$/m.test(config) || !/^#define CONFIG_NONFREE 0$/m.test(config))
             throw new Error("Chromium FFmpeg license configuration is unexpected.");
-         await writeFile(path.join(folder, `ffmpeg-${configPlatform}-x64-config.h`), config);
+         await writeFile(path.join(folder, `ffmpeg-${configPlatform}-${arch}-config.h`), config);
       }
       sourceArchives.push(await record(file));
       console.log(`Captured Electron FFmpeg source input: ${name}`);
    }
    const sumsFile = await download(`https://github.com/electron/electron/releases/download/v${version}/SHASUMS256.txt`, "electron-SHASUMS256.txt");
-   const zipName = `electron-v${version}-${platform}-x64.zip`;
+   const zipName = `electron-v${version}-${platform}-${arch}.zip`;
    const expected = (await readFile(sumsFile, "utf8"))
       .split(/\r?\n/)
       .find((line) => line.endsWith(zipName) && /\s\*?electron-v/.test(line))
@@ -152,12 +163,12 @@ export async function collectElectronFfmpeg(
    const metadataFile = path.join(folder, "correspondence.json");
    await writeFile(
       metadataFile,
-      `${JSON.stringify({ ...pins, ...(platform === "linux" ? { platform, moduleName } : {}), officialArchive: { name: zipName, sha256: expected }, ffmpegDll: { sha256: await hashFile(actualModule), size: actualDll.length }, sourceArchives, licenseFiles, buildInstructions }, null, 2)}\n`
+      `${JSON.stringify({ ...pins, ...(platform !== "win32" ? { platform, arch, moduleName } : {}), officialArchive: { name: zipName, sha256: expected }, ffmpegDll: { sha256: await hashFile(actualModule), size: actualDll.length }, sourceArchives, licenseFiles, buildInstructions }, null, 2)}\n`
    );
    const instructionsFile = path.join(folder, "BUILD.txt");
    await writeFile(
       instructionsFile,
-      `Electron ${version} FFmpeg module\n\nThe captured Electron DEPS pins Chromium ${pins.chromiumVersion}, commit ${pins.chromium}. Chromium DEPS pins FFmpeg ${pins.ffmpeg}. The bundled ${moduleName} was compared byte-for-byte with the checksum-verified official Electron zip.\n\nExtract chromium-ffmpeg.tar.gz as src/third_party/ffmpeg in a Chromium checkout at the captured commit. Extract the Electron source as src/electron and Chromium build scripts as src/build. Restore chromium-opus.tar.gz under src/third_party/opus, chromium-nasm.tar.gz under src/third_party/nasm, chromium-generate-stubs.tar.gz under src/tools/generate_stubs, and chromium-testing-build.tar.gz under src/testing. The captured Opus tree records upstream revision ${pins.opus}, with Chromium local changes. Restore chromium-root.gn as src/.gn and chromium-root-BUILD.gn as src/BUILD.gn. Follow Electron's captured docs/development/build-instructions-gn.md and platform instructions. Synchronize the pinned DEPS inputs with depot_tools, apply the captured Electron FFmpeg patch list, generate out/Release using electron/build/args/release.gn, and build the ffmpeg GN target. The release configuration uses Chrome branding, proprietary_codecs=true, and is_component_ffmpeg=true. The captured ${platform === "win32" ? "Windows" : "Linux"} x64 config has CONFIG_GPL=0 and CONFIG_NONFREE=0. The Electron FFmpeg patch only changes macOS install_name; its complete text is included. Generic compiler/toolchain downloads are not library source.\n\nElectron's MIT license does not replace this module's LGPL license. The module's complete source, generated configuration, license files, build scripts, patches, and immutable dependency records are included here.\n`
+      `Electron ${version} FFmpeg module\n\nThe captured Electron DEPS pins Chromium ${pins.chromiumVersion}, commit ${pins.chromium}. Chromium DEPS pins FFmpeg ${pins.ffmpeg}. The bundled ${moduleName} was compared byte-for-byte with the checksum-verified official Electron zip.\n\nExtract chromium-ffmpeg.tar.gz as src/third_party/ffmpeg in a Chromium checkout at the captured commit. Extract the Electron source as src/electron and Chromium build scripts as src/build. Restore chromium-opus.tar.gz under src/third_party/opus, chromium-nasm.tar.gz under src/third_party/nasm, chromium-generate-stubs.tar.gz under src/tools/generate_stubs, and chromium-testing-build.tar.gz under src/testing. The captured Opus tree records upstream revision ${pins.opus}, with Chromium local changes. Restore chromium-root.gn as src/.gn and chromium-root-BUILD.gn as src/BUILD.gn. Follow Electron's captured docs/development/build-instructions-gn.md and platform instructions. Synchronize the pinned DEPS inputs with depot_tools, apply the captured Electron FFmpeg patch list, generate out/Release using electron/build/args/release.gn, and build the ffmpeg GN target. The release configuration uses Chrome branding, proprietary_codecs=true, and is_component_ffmpeg=true. The captured ${platform === "win32" ? "Windows" : platform === "linux" ? "Linux" : "macOS"} ${arch} config has CONFIG_GPL=0 and CONFIG_NONFREE=0. The Electron FFmpeg patch only changes macOS install_name; its complete text is included. Generic compiler/toolchain downloads are not library source.\n\nElectron's MIT license does not replace this module's LGPL license. The module's complete source, generated configuration, license files, build scripts, patches, and immutable dependency records are included here.\n`
    );
    buildInstructions.push(
       await record(electronDeps),
@@ -166,7 +177,7 @@ export async function collectElectronFfmpeg(
       await record(path.join(folder, "ffmpeg-commit.json")),
       await record(metadataFile),
       await record(instructionsFile),
-      await record(path.join(folder, `ffmpeg-${configPlatform}-x64-config.h`)),
+      await record(path.join(folder, `ffmpeg-${configPlatform}-${arch}-config.h`)),
       await record(sumsFile)
    );
    return { id: "electron-ffmpeg-source", version, license: "LGPL-2.1-or-later", sourceArchives, licenseFiles, buildInstructions };

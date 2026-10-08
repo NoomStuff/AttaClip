@@ -58,9 +58,9 @@ try {
       const actual = await realpath(binary);
       if (inspected.has(actual)) return;
       inspected.add(actual);
-      const dependencies = run("otool", ["-L", binary])
+      const dependencies = run("otool", ["-arch", process.arch === "arm64" ? "arm64" : "x86_64", "-L", binary])
          .split("\n")
-         .slice(1)
+         .filter((line) => line.includes(" (compatibility version "))
          .map((line) => line.trim().split(" (compatibility")[0]!)
          .filter(Boolean);
       for (const dependency of dependencies) {
