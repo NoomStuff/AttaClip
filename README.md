@@ -12,6 +12,12 @@ The library is an ordinary folder. Existing supported videos appear automaticall
 
 AttaClip is for clips. Use OBS for full-session recording and AttaCut for cutting.
 
+## Try the Windows preview
+
+[Download AttaClip 0.1.0](https://github.com/NoomStuff/AttaClip/releases/tag/v0.1.0). Choose the installer or portable executable. The release includes matching source archives, full dependency notices and checksums. Windows builds are unsigned.
+
+Windows recording, audio, playback and sharing have passed actual installed and portable tests. Linux X11 capture works in the development build. macOS recording and Wayland/Linux application capture are still unavailable. See the recording limits below before relying on an untested setup.
+
 ## Development
 
 Use Bun 1.4.2 or later and a supported Node.js runtime. Windows recorder builds also need CMake and Visual Studio Build Tools with Desktop development with C++. The TypeScript build uses strict boundary validation and strict compiler checks.
@@ -42,9 +48,10 @@ bun run test:capture-loss
 bun run test:ui:native
 bun run package
 bun run test:packaged
+bun run test:portable
 ```
 
-`verify` checks formatting, lint, unit tests, strict types, and the application build. Media verification creates isolated real videos and checks full-duration size-limited exports, original preservation, cancellation, playback tracks, collection recovery, and safe file ownership. UI tests launch the actual Electron app against an isolated profile. Screenshots and traces land in `test-results`. Native and packaged capture tests record the selected screen on a supported Windows machine, check queued saves through source changes and stopping, and decode the actual outputs. Run those with test content visible on screen.
+`verify` checks formatting, lint, unit tests, strict types, and the application build. Media verification creates isolated real videos and checks full-duration size-limited exports, original preservation, cancellation, playback tracks, collection recovery, and safe file ownership. UI tests launch the actual Electron app against an isolated profile. Screenshots and traces land in `test-results`. The portable check connects to the launcher's child through a temporary localhost debugging port and runs the same recording and media assertions. Native and packaged capture tests record the selected screen on a supported Windows machine, check queued saves through source changes and stopping, and decode the actual outputs. Run those with test content visible on screen.
 
 `test:capture-loss` records an isolated application, loses its source for longer than the configured history, saves the retained footage, then verifies recovery and full decoding. `test:ui:native` verifies actual capture while preview streams end during navigation, minimize and close to tray. The regular UI suite tests moving preview pixels without requiring NVENC. Linux's dedicated Actions workflow records real X11 pixels and PulseAudio tones through an isolated Xvfb display and null audio sink.
 

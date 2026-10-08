@@ -1,11 +1,12 @@
-import { _electron as electron, expect } from "@playwright/test";
+import { _electron as electron, chromium, expect } from "@playwright/test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { createServer } from "node:net";
 import { defaultPreferences } from "../src/shared/defaults";
 
 // This captures the selected screen. Run manually on a supported Windows/NVIDIA
@@ -28,13 +29,59 @@ await writeFile(
       sound: false,
    })
 );
-const application = await electron.launch({
-   executablePath: executable,
-   args: ["--disable-gpu-sandbox"],
-   env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
-});
+const portable = process.env["ATTACLIP_PACKAGED_PORTABLE"] === "1";
+let closeApplication: (() => Promise<void>) | undefined;
 try {
-   const page = await application.firstWindow();
+   let page;
+   if (portable) {
+      const reservation = createServer();
+      await new Promise<void>((resolve, reject) => {
+         reservation.once("error", reject);
+         reservation.listen(0, "127.0.0.1", resolve);
+      });
+      const address = reservation.address();
+      if (!address || typeof address === "string") throw new Error("Could not reserve a portable test port");
+      await new Promise<void>((resolve, reject) => reservation.close((error) => (error ? reject(error) : resolve())));
+      const launcher = spawn(executable, [`--remote-debugging-port=${address.port}`, "--disable-gpu-sandbox"], {
+         windowsHide: true,
+         stdio: "ignore",
+         env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
+      });
+      closeApplication = async () => {
+         if (launcher.exitCode === null) launcher.kill();
+      };
+      const endpoint = `http://127.0.0.1:${address.port}`;
+      const deadline = Date.now() + 60000;
+      while (true) {
+         try {
+            if ((await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(1000) })).ok) break;
+         } catch {
+            /* The launcher is still extracting. */
+         }
+         if (Date.now() >= deadline) throw new Error("Portable application did not open its test connection");
+         await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      const browser = await chromium.connectOverCDP(endpoint);
+      page = browser.contexts()[0]?.pages()[0];
+      if (!page) throw new Error("Portable application did not open its window");
+      const portablePage = page;
+      closeApplication = async () => {
+         await portablePage.evaluate(() => window.attaClip.exit()).catch(() => undefined);
+         await browser.close().catch(() => undefined);
+         if (launcher.exitCode === null) launcher.kill();
+      };
+   } else {
+      const application = await electron.launch({
+         executablePath: executable,
+         args: ["--disable-gpu-sandbox"],
+         env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
+      });
+      closeApplication = async () => {
+         await application.evaluate(({ app }) => app.exit(0)).catch(() => undefined);
+         await application.close().catch(() => undefined);
+      };
+      page = await application.firstWindow();
+   }
    await page.waitForFunction(() => !!window.attaClip);
    const sources = await page.evaluate(() => window.attaClip.sources());
    const source = sources.find((item) => item.kind === "screen");
@@ -81,7 +128,7 @@ try {
    assert(clip.tracks.length >= 2, "Master and capture audio must exist");
    const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
    const originalHash = hash(await readFile(clip.path));
-   const ffmpeg = join(dirname(executable), "resources/media/ffmpeg.exe");
+   const ffmpeg = portable ? resolve("release/win-unpacked/resources/media/ffmpeg.exe") : join(dirname(executable), "resources/media/ffmpeg.exe");
    for (const saved of state.clips) await promisify(execFile)(ffmpeg, ["-v", "error", "-i", saved.path, "-f", "null", "-"], { windowsHide: true });
    await page.evaluate((id) => window.attaClip.createShareable(id, 1), clip.id);
    await expect
@@ -111,6 +158,5 @@ try {
       `Packaged capture, repeated saves followed by stop, separate audio, full decoding, playback, and size-limited sharing passed. Isolated files: ${profile}`
    );
 } finally {
-   await application.evaluate(({ app }) => app.exit(0)).catch(() => undefined);
-   await application.close().catch(() => undefined);
+   await closeApplication?.();
 }

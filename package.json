@@ -26,7 +26,8 @@
       "bundle:media": "bun scripts/bundle-media.ts",
       "build:native": "bun scripts/build-native.ts",
       "dist": "bun run build:icons && bun run build:notices && bun run build && electron-builder",
-      "package": "bun run build:icons && bun run build:notices && bun run build && electron-builder --dir"
+      "package": "bun run build:icons && bun run build:notices && bun run build && electron-builder --dir",
+      "test:portable": "bun scripts/test-portable.ts"
    },
    "build": {
       "appId": "dev.attaclip.app",
