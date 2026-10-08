@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve, join } from "node:path";
-import { mkdtemp, rm, writeFile, stat, utimes } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, stat, utimes, realpath } from "node:fs/promises";
 import os from "node:os";
 import { CollectionService, withinRoot } from "./collection";
 import type * as fileOperations from "node:fs/promises";
@@ -83,7 +83,7 @@ describe("collection scan cost and fresh action checks", () => {
          expect(io.identities).toBe(0);
          expect(io.writes).toBe(0);
          expect((await stat(metadata, { bigint: true })).mtimeNs).toBe(firstMetadataTime);
-         expect(await collection.filesForDeletion(id)).toEqual([file]);
+         expect(await collection.filesForDeletion(id)).toEqual([await realpath(file)]);
          expect(io.identities).toBe(1);
          const before = await stat(file);
          await writeFile(file, "different media content");

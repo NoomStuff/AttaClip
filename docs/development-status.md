@@ -18,11 +18,17 @@ Windows native capture tests passed full decoding of queued clips through source
 
 ## Remaining work
 
-Finish native audio signal verification and recording-module network suppression, then rebuild and test packaged Windows capture. Build local Windows NSIS and portable outputs. Publish source and run GitHub checks and desktop builds. Verify installed/portable update behavior.
+Native audio signal verification initially produced silence. The agent traced this to the Windows output endpoint being muted at volume zero. Its independent endpoint meter sees the generated tone before that mute, while driver loopback receives silence. The agent is temporarily unmuting the endpoint for an isolated tone test, with exact mute/volume restoration in finally. Wait for actual amplitude, gain and mute assertions before claiming audio works. The upstream win-capture compatibility updater is now suppressed before its HTTP worker starts, without modifying the bundled module.
+
+Source is published on GitHub as `cf18cb7`. Local Windows NSIS and portable builds completed, and packaged capture, queued saves, full video decoding, playback and a 1 MB shareable passed again. Audio stream presence is tested separately from audible signal. A main-process startup race found in review is fixed after that package and needs repackaging and regression verification. Helper stdin EPIPE handling is under review.
+
+First GitHub checks failed on a test comparing a short Windows temp alias against its canonical path. The Windows desktop build failed because Git converted a checksum-pinned vendored header to CRLF. Both fixes are in progress. Linux and macOS packaging jobs completed, with capture explicitly unavailable. Re-run checks and the build matrix after the next push. Verify installed/portable update behavior.
 
 Cross-platform application builds do not yet include verified macOS or Linux capture. A Linux X11/PulseAudio backend and headless capture checks are under development in an isolated WSL environment. Windows capture has been tested with NVIDIA NVENC. Auto game detection and overlap avoidance remain unavailable, with explicit UI feedback. Custom profiles, native microphone endpoint selection, audio-level events and recording-time gain/mute are implemented, with real audio-signal verification pending. HDR remains unverified. The preview currently refreshes capture thumbnails rather than displaying the native stream. Exclusive-fullscreen notification behavior remains unproven.
 
 Public binary releases require corresponding sources and notices for the exact bundled OBS, FFmpeg and dependency builds. The staged Windows FFmpeg is now the pinned BtbN 8.1.3 build, not the machine's default FFmpeg. The source-kit script archives exact commits, build recipes, patches and dependency sources. Its agent is collecting dependency closure and license evidence; a source archive or upstream URL alone does not clear distribution. Desktop Actions currently upload build reports only, never installers, until this is complete.
+
+Source-kit checkpoint has eight core/recipe archives and 134 dependency source records, about 717 MB, with zero failed downloads. Remaining source closure includes shaderc DEPS, Git submodules and Rust crates, plus release-time verification of tag-pinned Vulkan-Headers, OpenSSL and MbedTLS. See `docs/releases.md` and the generated manifest under `work/release-sources`.
 
 ## Work continuation
 
@@ -31,3 +37,5 @@ The user authorized the full implementation, public GitHub repository, builds, t
 If this file is read by the scheduled continuation, inspect the current Git status, agent progress and GitHub run status first. This snapshot may be older than the code. Continue resolving concrete failures and testing actual behavior. Do not replace remaining backend work with simulated success.
 
 Agent ownership: recorder owns native files, recorder wrapper, build-native and smoke scripts, plus the Linux native workflow. Collection owns collection/media and the release-sources script and docs. Interface work is checkpointed, with no pending renderer edits. Root owns main integration, preferences, shared naming, packaged tests and general workflows. Coordinate before staging an agent's in-progress changes.
+
+The next scheduled continuation is 8 October at 10:35 Europe/Amsterdam, after the primary usage reset at 10:29. Inspect its automation before replacing it, so there is only one continuation. Outstanding local installers predate the audio fix and startup race fix. Do not distribute them as ready releases.

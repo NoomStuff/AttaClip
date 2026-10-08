@@ -3,9 +3,19 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
-import { hashFile, inventory, validateKit, sourcePins, type SourceKit } from "./release-sources.ts";
+import { hashFile, inventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
 
 describe("release source evidence", () => {
+   it("follows declared library dependencies and grouped private prerequisites", () => {
+      const base = { provider: "BtbN/FFmpeg-Builds", uri: "https://github.com/test/library.git", revision: "abc", version: "" };
+      const refs = [
+         { ...base, recipe: "build/scripts.d/50-libjxl/50-libjxl.sh", enabledFlags: ["--enable-libjxl"], dependsOn: ["base", "brotli"] },
+         { ...base, recipe: "build/scripts.d/50-libjxl/45-lcms2.sh", enabledFlags: [], dependsOn: [] },
+         { ...base, recipe: "build/scripts.d/30-brotli.sh", enabledFlags: [], dependsOn: [] },
+         { ...base, recipe: "build/scripts.d/50-unrelated.sh", enabledFlags: ["--enable-other"], dependsOn: [] },
+      ];
+      expect(dependencyClosure(refs, new Set(["--enable-libjxl"])).map((ref) => ref.recipe)).toEqual(refs.slice(0, 3).map((ref) => ref.recipe));
+   });
    it("allows complete technical records and does not require source for permissive licenses", async () => {
       const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-source-kit-"));
       try {

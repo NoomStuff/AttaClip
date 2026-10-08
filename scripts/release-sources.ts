@@ -264,10 +264,21 @@ async function exportRepository(ref: DependencyRecipeRef, file: string, director
    const git = path.join(directory, "git-exports", key);
    await mkdir(git, { recursive: true });
    await runAsync("git", ["init", "--bare", git]);
-   await runAsync("git", ["-c", "protocol.file.allow=never", "-C", git, "fetch", "--depth", "1", ref.uri, ref.revision], 180_000);
+   await runAsync("git", ["-C", git, "config", "remote.origin.url", ref.uri]);
+   await runAsync("git", ["-C", git, "config", "remote.origin.promisor", "true"]);
+   await runAsync("git", ["-C", git, "config", "remote.origin.partialclonefilter", "blob:none"]);
+   await runAsync("git", ["-c", "protocol.file.allow=never", "-C", git, "fetch", "--depth", "1", "--filter=blob:none", "origin", ref.revision], 180_000);
    const commit = (await runAsync("git", ["-C", git, "rev-parse", "FETCH_HEAD^{commit}"])).trim();
    if (/^[a-f\d]{7,40}$/i.test(ref.revision) && !commit.startsWith(ref.revision)) throw new Error("Fetched Git commit differs from recipe pin.");
-   await runAsync("git", ["-C", git, "archive", "--format=tar.gz", `--prefix=source-${commit}/`, `--output=${file}`, commit], 180_000);
+   const subset: string[] = [];
+   if (uri.pathname === "/GPUOpen-LibrariesAndSDKs/AMF.git") {
+      // The recipe installs headers only. Exclude SDK sample executables and
+      // media assets, which are not source used to build this FFmpeg binary.
+      subset.push("amf/public/include");
+      const names = (await runAsync("git", ["-C", git, "ls-tree", "--name-only", commit])).trim().split(/\r?\n/);
+      subset.push(...names.filter((name) => /^licen[cs]e|^copying/i.test(name)));
+   }
+   await runAsync("git", ["-C", git, "archive", "--format=tar.gz", `--prefix=source-${commit}/`, `--output=${file}`, commit, ...subset], 180_000);
    return commit;
 }
 
@@ -282,6 +293,7 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
    let extension = ".tar.gz";
    let repositoryExport = false;
    let exportedRevision: string | undefined;
+   if (uri.pathname === "/GPUOpen-LibrariesAndSDKs/AMF.git") repositoryExport = true;
    if (revision.startsWith("${PSScriptRoot}/")) {
       const checksumPath = path.posix.join(path.posix.dirname(ref.recipe), revision.substring("${PSScriptRoot}/".length));
       expectedDigest = /[a-f\d]{64}/i.exec(run("tar", ["-xOzf", path.join(directory, recipeArchive.path), checksumPath]))?.[0].toLowerCase();
@@ -346,7 +358,7 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
       members = run("tar", ["-tf", file]).trim().split(/\r?\n/);
    }
    let resolvedRevision = exportedRevision ?? revision;
-   if (uri.hostname === "github.com" && !expectedDigest) {
+   if (uri.hostname === "github.com" && !expectedDigest && !exportedRevision) {
       const resolved = /-([a-f\d]{40})\/$/i.exec(members[0] ?? "")?.[1];
       if (!resolved) throw new Error("GitHub source archive lacks an immutable commit prefix.");
       if (/^[a-f\d]{7,40}$/i.test(revision) && !resolved.startsWith(revision)) throw new Error("Source commit does not match the pinned revision.");
@@ -367,7 +379,7 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
    if (/git submodule|git-sync-deps|fetch.*depend|cargo (?:update|cinstall)/.test(recipeText))
       review.push("Recipe fetches submodules or package dependencies. Archive those pinned source inputs before marking this component complete.");
    if (!licenses.length) review.push("No license file recognized in the source archive. Check the upstream source tree.");
-   if (!expectedDigest && !/^[a-f\d]{7,40}$/i.test(ref.revision))
+   if (!expectedDigest && !/^[a-f\d]{7,40}$/i.test(ref.revision) && !resolvedRevision.startsWith("svn-r"))
       review.push("Recipe pins a tag, not a commit. The collected commit needs comparison with the release-time dependency input.");
    return {
       path: path.relative(directory, file).replaceAll("\\", "/"),
@@ -383,11 +395,13 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
    };
 }
 
-async function collectDependencies(kit: SourceKit, directory: string, project: string): Promise<void> {
+async function collectDependencies(kit: SourceKit, directory: string, project: string, retry = false): Promise<void> {
    const provenance = await readFile(path.join(project, "resources", "media", "provenance.json"), "utf8");
    const enabled = new Set(provenance.match(/--enable-[\w-]+/g) ?? []);
-   const selected = dependencyClosure(kit.dependencyRecipeRefs ?? [], enabled);
-   kit.dependencySources = [];
+   const selected = dependencyClosure(kit.dependencyRecipeRefs ?? [], enabled).filter(
+      (ref) => !retry || !(kit.dependencySources ?? []).some((source) => source.recipe === ref.recipe)
+   );
+   kit.dependencySources = retry ? (kit.dependencySources ?? []) : [];
    kit.dependencyFailures = [];
    let cursor = 0;
    // Four independent network downloads keep this bounded and avoid a large
@@ -430,6 +444,13 @@ export async function validateKit(kit: SourceKit, kitDirectory: string, project:
    for (const pin of sourcePins)
       if (!kit.sources.some((source) => source.repository === pin.repository && source.commit === pin.commit))
          blockers.push(`Pinned source archive missing: ${pin.name}`);
+   for (const source of kit.dependencySources ?? []) {
+      for (const file of [source, ...source.licenses]) {
+         const absolute = path.resolve(kitDirectory, file.path);
+         if (!absolute.startsWith(`${path.resolve(kitDirectory)}${path.sep}`)) throw new Error("Dependency archive path escapes its directory.");
+         if (!existsSync(absolute) || (await hashFile(absolute)) !== file.sha256) blockers.push(`Missing or changed dependency archive: ${file.path}`);
+      }
+   }
    const requiredEvidence = kit.requiredEvidence ?? ["dependency-source-coverage"];
    if (kit.evidence?.stagedDigest !== createHash("sha256").update(JSON.stringify(current)).digest("hex"))
       blockers.push("Dependency source evidence is absent or covers a different staged binary set.");
@@ -462,6 +483,12 @@ export async function validateKit(kit: SourceKit, kitDirectory: string, project:
 
 export async function collectKit(project: string, destination: string, downloadSources: boolean): Promise<SourceKit> {
    await mkdir(destination, { recursive: true });
+   let previous: SourceKit | undefined;
+   try {
+      previous = JSON.parse(await readFile(path.join(destination, "manifest.json"), "utf8")) as SourceKit;
+   } catch {
+      /* A fresh kit does not require an earlier manifest. */
+   }
    const staged = [
       ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
       ...(await inventory(path.join(project, "resources", "media"), "media")),
@@ -563,6 +590,13 @@ export async function collectKit(project: string, destination: string, downloadS
          .filter((source) => source.repository === "BtbN/FFmpeg-Builds" || source.repository === "obsproject/obs-deps")
          .flatMap((source) => recipeRefs(source, destination)),
    };
+   // Refreshing staging must not erase already collected immutable source records.
+   // Their recipe paths include the pinned recipe commit; drop records only when
+   // that pinned input actually changes, and validate every retained archive.
+   if (previous?.dependencySources)
+      kit.dependencySources = previous.dependencySources.filter((source) => kit.dependencyRecipeRefs?.some((ref) => source.recipe === ref.recipe));
+   if (previous?.dependencyFailures)
+      kit.dependencyFailures = previous.dependencyFailures.filter((failure) => kit.dependencyRecipeRefs?.some((ref) => failure.recipe === ref.recipe));
    kit.blockers = await validateKit(kit, destination, project);
    kit.publicInstallerReady = kit.blockers.length === 0;
    await writeFile(path.join(destination, "manifest.json"), `${JSON.stringify(kit, null, 2)}\n`);
@@ -574,12 +608,13 @@ if (import.meta.main) {
    const destination = path.join(project, "work", "release-sources");
    const check = process.argv.includes("--check");
    let kit: SourceKit;
-   if (check) {
+   if (check || process.argv.includes("--retry-dependencies")) {
       kit = JSON.parse(await readFile(path.join(destination, "manifest.json"), "utf8")) as SourceKit;
       kit.blockers = await validateKit(kit, destination, project);
       kit.publicInstallerReady = kit.blockers.length === 0;
    } else kit = await collectKit(project, destination, !process.argv.includes("--inventory-only"));
-   if (!check && process.argv.includes("--dependencies")) await collectDependencies(kit, destination, project);
+   if (!check && (process.argv.includes("--dependencies") || process.argv.includes("--retry-dependencies")))
+      await collectDependencies(kit, destination, project, process.argv.includes("--retry-dependencies"));
    console.log(`Source kit: ${destination}\n${kit.staged.length} staged files, ${kit.sources.length} source archives.`);
    for (const blocker of kit.blockers) console.error(`Blocked: ${blocker}`);
    // This flag only controls archival job exit status. Publication still needs

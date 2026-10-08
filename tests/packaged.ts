@@ -41,8 +41,19 @@ try {
    await page.evaluate(async (id) => {
       const state = await window.attaClip.state();
       await window.attaClip.savePreferences({ ...state.preferences, sourceId: id, sourceKind: "screen" });
-      await window.attaClip.startRecording();
    }, source.id);
+   await page.evaluate(async () => {
+      const starting = window.attaClip.startRecording();
+      const state = await window.attaClip.state();
+      let blocked = false;
+      try {
+         await window.attaClip.savePreferences({ ...state.preferences, quality: "high" });
+      } catch {
+         blocked = true;
+      }
+      if (!blocked) throw new Error("Settings changed during capture startup");
+      await starting;
+   });
    await expect.poll(() => page.evaluate(async () => (await window.attaClip.state()).recorder.state), { timeout: 30000 }).toBe("recording");
    await expect.poll(() => page.evaluate(async () => (await window.attaClip.state()).recorder.availableSeconds), { timeout: 30000 }).toBeGreaterThanOrEqual(5);
    await page.evaluate(() => window.attaClip.saveClip());

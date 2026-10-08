@@ -32,6 +32,7 @@ let closingRequested = false;
 let cachedSources: CaptureSource[] = [];
 let preferenceWrites: Promise<unknown> = Promise.resolve();
 let collectionReady: Promise<void> = Promise.resolve();
+let startingCapture: Promise<void> | null = null;
 const mediaFiles = new Map<string, string>();
 const mediaKeys = new Map<string, string>();
 const collections = new CollectionService({
@@ -76,7 +77,8 @@ function state(): AppState {
       clips: collections.clips,
       categories: collections.categories,
       jobs: collections.jobs,
-      recorder: recorder.status,
+      recorder:
+         startingCapture && recorder.status.state === "stopped" ? { ...recorder.status, state: "starting", message: "Starting recording" } : recorder.status,
       update: updates.state,
       version: app.getVersion(),
       platform: process.platform,
@@ -236,6 +238,7 @@ function updateTray() {
          },
          {
             label: active ? "Stop recording" : "Start recording",
+            enabled: !startingCapture,
             click: () => void (active ? recorder.stop() : startRecording()).catch((e) => notice(errorMessage(e), true)),
          },
          { label: "Save clip", enabled: active, click: () => void saveClip().catch((e) => notice(errorMessage(e), true)) },
@@ -246,8 +249,22 @@ function updateTray() {
 }
 async function startRecording() {
    if (closingRequested) throw new Error("AttaClip is preparing to exit. Keep the app open to record.");
-   if (["starting", "recording", "waiting"].includes(recorder.status.state)) throw new Error("Recording is already running.");
-   await recorder.start(preferences, await sources());
+   if (startingCapture || ["starting", "recording", "waiting"].includes(recorder.status.state)) throw new Error("Recording is already running.");
+   startingCapture = (async () => {
+      await preferenceWrites.catch(() => undefined);
+      const available = await sources();
+      if (closingRequested) throw new Error("AttaClip is preparing to exit. Keep the app open to record.");
+      await recorder.start(preferences, available);
+   })();
+   emitState();
+   updateTray();
+   try {
+      await startingCapture;
+   } finally {
+      startingCapture = null;
+      emitState();
+      updateTray();
+   }
 }
 async function saveClip() {
    const requestedAt = Date.now();
@@ -280,6 +297,7 @@ async function prepareExit(): Promise<boolean> {
    if (exiting) return exiting;
    closingRequested = true;
    exiting = (async () => {
+      await startingCapture?.catch(() => undefined);
       const saves = recorder.status.pendingSaves;
       if (saves || pendingJobs().length) {
          const decision = await pendingExitDecision(
@@ -320,7 +338,7 @@ async function prepareExit(): Promise<boolean> {
             while (pendingJobs().length) await new Promise((r) => setTimeout(r, 150));
          }
       } else {
-         if (recorder.status.state === "recording") {
+         if (["recording", "waiting"].includes(recorder.status.state)) {
             const result = await dialog.showMessageBox({
                type: "question",
                message: "Stop recording and exit?",
@@ -386,6 +404,7 @@ function registerIPC() {
       const operation = preferenceWrites
          .catch(() => undefined)
          .then(async () => {
+            if (startingCapture) throw new Error("Recording is starting. Wait before applying settings.");
             const next = preferencesSchema.parse(value);
             if (!next.collection.trim()) throw new Error("Choose a collection folder.");
             if (!isValidShortcut(next.shortcut)) throw new Error("That key combination is not supported. Try a letter, number, or function key.");
@@ -439,7 +458,10 @@ function registerIPC() {
       return operation;
    });
    handle("record-start", () => startRecording());
-   handle("record-stop", () => recorder.stop());
+   handle("record-stop", async () => {
+      await startingCapture?.catch(() => undefined);
+      await recorder.stop();
+   });
    handle("record-save", () => saveClip());
    handle("share", (id, target) =>
       collections.createShareable(idSchema.parse(id), target === undefined ? preferences.shareSizeMB : z.number().min(1).max(2000).parse(target))
