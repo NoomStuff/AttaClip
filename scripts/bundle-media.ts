@@ -5,13 +5,14 @@ import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { checkMediaBinary } from "./check-media-binary.ts";
 import { readControlledBuild, type ControlledMediaBuild } from "./controlled-media";
+import { readControlledLinuxBuild, type ControlledLinuxMediaBuild } from "./controlled-media-linux";
 
 const destination = resolve("resources/media");
 // This directory contains generated files only. Remove stale binaries from other platforms.
 if (destination !== join(process.cwd(), "resources", "media")) throw new Error("Unexpected media destination");
 await rm(destination, { recursive: true, force: true });
 await mkdir(destination, { recursive: true });
-const provenance: Record<string, { path: string; sha256: string; version: string } | ControlledMediaBuild> = {};
+const provenance: Record<string, { path: string; sha256: string; version: string } | ControlledMediaBuild | ControlledLinuxMediaBuild> = {};
 for (const name of ["ffmpeg", "ffprobe"] as const) {
    const binary = `${name}${process.platform === "win32" ? ".exe" : ""}`;
    const source = await realpath(
@@ -21,8 +22,8 @@ for (const name of ["ffmpeg", "ffprobe"] as const) {
             .split(/\r?\n/)[0]!
    );
    checkMediaBinary(source);
-   if (process.platform === "win32" && existsSync(join(dirname(source), "build-manifest.json"))) {
-      const controlled = await readControlledBuild(dirname(source));
+   if ((process.platform === "win32" || process.platform === "linux") && existsSync(join(dirname(source), "build-manifest.json"))) {
+      const controlled = process.platform === "linux" ? await readControlledLinuxBuild(dirname(source)) : await readControlledBuild(dirname(source));
       if (
          controlled.binaries[name].sha256 !==
          createHash("sha256")
@@ -36,7 +37,8 @@ for (const name of ["ffmpeg", "ffprobe"] as const) {
       const evidence = join(destination, "controlled-build");
       await mkdir(evidence, { recursive: true });
       for (const entry of await readdir(dirname(source)))
-         if (!entry.endsWith(".exe")) await cp(join(dirname(source), entry), join(evidence, entry), { recursive: true });
+         if (!entry.endsWith(".exe") && entry !== "ffmpeg" && entry !== "ffprobe")
+            await cp(join(dirname(source), entry), join(evidence, entry), { recursive: true });
    }
    await copyFile(source, join(destination, binary));
    if (process.platform !== "win32") await chmod(join(destination, binary), 0o755);

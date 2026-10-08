@@ -1,0 +1,31 @@
+name: macOS OBS module investigation
+on:
+   workflow_dispatch:
+   push:
+      paths:
+         - native/macos-probe/**
+         - scripts/build-native-macos.ts
+         - .github/workflows/native-macos-probe.yml
+permissions:
+   contents: read
+jobs:
+   modules:
+      runs-on: macos-15
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - run: bun install --frozen-lockfile
+         - name: Compile and load pinned OBS modules without capturing
+           run: bun scripts/build-native-macos.ts
+         - uses: actions/upload-artifact@v7
+           if: always()
+           with:
+              name: macOS-module-investigation
+              path: |
+                 .cache/macos-probe/module-proof.json
+                 .cache/macos-probe/link-proof.txt
+                 .cache/macos-probe/build/CMakeFiles/CMakeConfigureLog.yaml
+              retention-days: 7

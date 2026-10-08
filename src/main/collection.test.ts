@@ -6,7 +6,7 @@ import { CollectionService, withinRoot } from "./collection";
 import type * as fileOperations from "node:fs/promises";
 import type * as mediaOperations from "./media";
 
-const io = vi.hoisted(() => ({ identities: 0, writes: 0 }));
+const io = vi.hoisted(() => ({ identities: 0, writes: 0, beforeProbe: undefined as (() => Promise<void>) | undefined }));
 vi.mock("node:fs/promises", async (original) => {
    const fs = await original<typeof fileOperations>();
    return {
@@ -22,7 +22,10 @@ vi.mock("./media", async (original) => {
    const media = await original<typeof mediaOperations>();
    return {
       ...media,
-      probe: async () => ({ duration: 10, width: 640, height: 360, frameRate: 30, videoCodec: "h264", tracks: [] }),
+      probe: async () => {
+         await io.beforeProbe?.();
+         return { duration: 10, width: 640, height: 360, frameRate: 30, videoCodec: "h264", tracks: [] };
+      },
       runMedia: async (_name: string, args: string[]) => {
          await writeFile(args.at(-1)!, "fixture thumbnail");
          return "";
@@ -43,6 +46,49 @@ describe("collection ownership boundaries", () => {
 });
 
 describe("collection scan cost and fresh action checks", () => {
+   it("registers consecutive recordings after a watcher scan took an older directory snapshot", async () => {
+      const root = await mkdtemp(join(os.tmpdir(), "attaclip-registration-"));
+      let release: (() => void) | undefined;
+      try {
+         const collection = new CollectionService();
+         await collection.open(root);
+         await writeFile(join(root, "existing.mp4"), "older media");
+         const held = new Promise<void>((resolve) => {
+            release = resolve;
+         });
+         let entered: (() => void) | undefined;
+         const scanning = new Promise<void>((resolve) => {
+            entered = resolve;
+         });
+         io.beforeProbe = async () => {
+            io.beforeProbe = undefined;
+            entered?.();
+            await held;
+         };
+         const scan = vi.spyOn(collection, "scan");
+         const watcher = collection.scan();
+         await scanning;
+         const first = join(root, "first.mkv");
+         const second = join(root, "second.mkv");
+         await writeFile(first, "first saved recording");
+         await writeFile(second, "second saved recording");
+         const registrations = Promise.all([
+            collection.registerRecording(first, "First application"),
+            collection.registerRecording(second, "Second application"),
+         ]);
+         await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(3));
+         release?.();
+         const clips = await registrations;
+         await watcher;
+         expect(clips.map((clip) => clip.source)).toEqual(["First application", "Second application"]);
+         expect(collection.clips).toHaveLength(3);
+         expect(collection.warnings).toEqual([]);
+      } finally {
+         release?.();
+         io.beforeProbe = undefined;
+         await rm(root, { recursive: true, force: true });
+      }
+   });
    it("keeps a warm 200-file scan free of sampled reads and metadata writes", async () => {
       const root = await mkdtemp(join(os.tmpdir(), "attaclip-scan-cost-"));
       try {

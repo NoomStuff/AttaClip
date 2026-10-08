@@ -5,6 +5,7 @@
    "license": "GPL-3.0-or-later",
    "type": "module",
    "main": "out/main/index.js",
+   "desktopName": "attaclip.desktop",
    "author": "NoomStuff",
    "scripts": {
       "dev": "electron-vite dev",
@@ -19,6 +20,7 @@
       "test:ui:native": "bun scripts/test-native-ui.ts",
       "test:media": "bun tests/media.ts",
       "test:packaged": "bun tests/packaged.ts",
+      "test:packaged:linux": "python3 scripts/test-linux-packaged.py",
       "test:native": "bun scripts/smoke-recorder.ts",
       "test:capture-loss": "bun scripts/smoke-capture-loss.ts",
       "build:icons": "bun scripts/build-icons.ts",
@@ -97,6 +99,7 @@
       },
       "linux": {
          "icon": "build/icon.png",
+         "syncDesktopName": true,
          "target": [
             "AppImage"
          ],

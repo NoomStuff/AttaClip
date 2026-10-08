@@ -1,6 +1,6 @@
 # Development status
 
-Updated 8 October 2026 at 17:10 Europe/Amsterdam. This is a handoff, not extra agent instructions.
+Updated 9 October 2026 at 00:04 Europe/Amsterdam. This is a handoff, not extra agent instructions.
 
 ## Published Windows checkpoint
 
@@ -42,6 +42,14 @@ Preserve the verified Windows release while tackling these. Prioritize platform 
 
 ## Continuation
 
-Dave authorized implementation, public GitHub publishing, builds, computer testing and delegation. Repository is https://github.com/NoomStuff/AttaClip on main. Preserve user changes. Recorder, collection and interface agents completed their assigned checkpoints; no edits remain in progress.
+Dave authorized implementation, public GitHub publishing, builds, computer testing and delegation. Repository is https://github.com/NoomStuff/AttaClip on main. Preserve user changes. The research move and root AttaCut license removal are committed as fa1a448. The retained MIT notice now lives at licenses/AttaCut-MIT.txt, with packaging and verification following that location.
 
-Primary usage reached 96 percent at 17:08 local time. The single continuation automation continue-attaclip-after-reset is scheduled for 20:45 Europe/Amsterdam after the 20:40 reset. Check latest main CI and the public release before continuing. Do not repeat completed Windows release work. Remaining platform work may continue within the existing authorization. Do not consume the account's available manual reset credit without Dave's instruction.
+An isolated Linux application snapshot under .cache/linux-app builds an actual AppImage. Its first extracted payload passed real private X11/PulseAudio capture, repeated saves through Stop, actual screen pixels and audio, full decoding, playback and a 1 MB shareable. That run exposed a library registration race. A scan begun before a new recording completed could falsely report that its preserved file could not open. The regression test reproduced that failure. Registration now refreshes the stale snapshot and preserves the source attribution. Rebuilt AppImage verification is pending. The Linux capture workflow now also exercises the actual packaged app.
+
+Controlled Linux FFmpeg is compiling with one worker from the four already pinned source archives. New recipe, provenance checks, codec fixtures and documentation are tracked. Source and full license evidence stage alongside the binaries. Actual compilation, independent codec checks and testing the AppImage with these controlled binaries remain pending. This does not close the separate OBS/PPA, bundled Ubuntu libraries or Electron source obligations. Do not publish a Linux binary yet.
+
+The macOS investigation has a separate pinned OBS 32.2.2 module probe. It compiles Objective-C++ against the matching official framework and checks source/encoder registration without opening capture devices or requesting permissions. Its actual GitHub run is pending. Production Mac recording remains disabled. A backend needs exact display/window identity mapping, a main-thread Mac event loop, TCC permission attribution tests and VideoToolbox-specific configuration.
+
+47 unit tests, strict types and real-media integration passed during this continuation. The new registration test failed before the fix and passes after it. An isolated Linux GUI test disables Chromium sandboxing for the private WSL fixture. This does not prove normal desktop sandbox startup or hardware gameplay performance. Private captures stay ignored.
+
+Weekly account usage reached 93 percent. The next weekly reset is 14 October 2026 at 12:56 Europe/Amsterdam. Do not consume the account's manual reset credit without Dave's instruction. The old single continuation wake has fired and needs updating if further automatic work is deferred. Do not repeat or replace the published Windows release.

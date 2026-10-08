@@ -11,7 +11,7 @@ permissions:
 jobs:
    actual-capture:
       runs-on: ubuntu-24.04
-      timeout-minutes: 20
+      timeout-minutes: 30
       steps:
          - uses: actions/checkout@v7
          - uses: oven-sh/setup-bun@v2
@@ -26,6 +26,17 @@ jobs:
            run: bun scripts/build-native-linux.ts
          - name: Record actual screen and audio
            run: python3 scripts/smoke-linux.py resources/recorder
+         - run: bun install --frozen-lockfile
+         - name: Stage pinned standalone media for the private package test
+           run: bun scripts/provision-media.ts
+         - run: bun run bundle:media
+         - run: bun run build:icons
+         - run: bun run build:notices
+         - run: bun run build
+         - name: Build the AppImage without publishing
+           run: bunx electron-builder --linux AppImage --publish never
+         - name: Verify actual AppImage capture, playback and sharing
+           run: bun run test:packaged:linux release/*.AppImage
          - name: Keep synthetic capture evidence
            if: always()
            uses: actions/upload-artifact@v7
@@ -35,4 +46,6 @@ jobs:
                  .cache/linux-smoke/**/measurements.json
                  .cache/linux-smoke/**/events.json
                  .cache/linux-smoke/**/*.log
+                 .cache/linux-packaged/**/report.json
+                 .cache/linux-packaged/**/*.log
               if-no-files-found: ignore

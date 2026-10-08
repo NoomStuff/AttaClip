@@ -453,10 +453,17 @@ export class CollectionService {
       const actual = await realpath(path);
       if (!withinRoot(this.root, actual)) throw new Error("The saved recording is outside the collection.");
       await this.scan();
-      const clip = this.clips.find((entry) => normal(entry.path) === normal(actual));
+      let clip = this.clips.find((entry) => normal(entry.path) === normal(actual));
+      if (!clip) {
+         // A watcher scan may have listed the directory before this save finished.
+         // Its completed snapshot cannot establish that the new file is unreadable.
+         await this.scan();
+         clip = this.clips.find((entry) => normal(entry.path) === normal(actual));
+      }
       if (!clip) throw new Error("The recording finished, but could not be opened. Its file has been kept.");
       this.stored(clip.id).source = source;
       await this.writeMetadata();
+      if (this.scanRunning) await this.scanRunning;
       await this.scan();
       return this.visible(clip.id);
    }

@@ -9,12 +9,14 @@ import { promisify } from "node:util";
 import { createServer } from "node:net";
 import { defaultPreferences } from "../src/shared/defaults";
 
-// This captures the selected screen. Run manually on a supported Windows/NVIDIA
-// machine, against the unpacked application rather than the development runtime.
-if (process.platform !== "win32") throw new Error("Packaged capture verification requires Windows");
+// This captures the selected screen. Windows uses the real desktop. The Linux
+// runner supplies a private X11/PulseAudio fixture and explicit software opt-in.
+if (process.platform !== "win32" && process.platform !== "linux") throw new Error("Packaged capture verification requires Windows or Linux X11");
+const linux = process.platform === "linux";
+if (linux && process.env["ATTACLIP_PACKAGED_PRIVATE_X11"] !== "1") throw new Error("Use scripts/test-linux-packaged.py for isolated Linux capture.");
 const profile = await mkdtemp(join(tmpdir(), "attaclip-packaged-"));
 const collection = join(profile, "clips");
-const executable = resolve(process.env["ATTACLIP_PACKAGED_EXE"] ?? "release/win-unpacked/AttaClip.exe");
+const executable = resolve(process.env["ATTACLIP_PACKAGED_EXE"] ?? (linux ? "release/linux-unpacked/attaclip" : "release/win-unpacked/AttaClip.exe"));
 await mkdir(collection);
 await writeFile(
    join(profile, "preferences.json"),
@@ -27,6 +29,7 @@ await writeFile(
       shortcut: "Control+Alt+Shift+F12",
       notifications: "off",
       sound: false,
+      allowSoftwareEncoder: linux,
    })
 );
 const portable = process.env["ATTACLIP_PACKAGED_PORTABLE"] === "1";
@@ -73,7 +76,7 @@ try {
    } else {
       const application = await electron.launch({
          executablePath: executable,
-         args: ["--disable-gpu-sandbox"],
+         args: linux ? ["--no-sandbox", "--disable-gpu-sandbox"] : ["--disable-gpu-sandbox"],
          env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
       });
       closeApplication = async () => {
@@ -123,13 +126,31 @@ try {
    const state = await page.evaluate(() => window.attaClip.state());
    assert.equal(state.recorder.state, "stopped");
    assert.equal(state.recorder.availableSeconds, 0);
+   for (const saved of state.clips) assert.equal(saved.source, source.name, "Each completed clip must register its actual capture source");
    const clip = state.clips[0]!;
    assert(clip.duration >= 4, "Queued capture must retain footage when stopped");
    assert(clip.tracks.length >= 2, "Master and capture audio must exist");
    const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
    const originalHash = hash(await readFile(clip.path));
-   const ffmpeg = portable ? resolve("release/win-unpacked/resources/media/ffmpeg.exe") : join(dirname(executable), "resources/media/ffmpeg.exe");
+   const ffmpeg = portable
+      ? resolve("release/win-unpacked/resources/media/ffmpeg.exe")
+      : join(dirname(executable), "resources/media", linux ? "ffmpeg" : "ffmpeg.exe");
    for (const saved of state.clips) await promisify(execFile)(ffmpeg, ["-v", "error", "-i", saved.path, "-f", "null", "-"], { windowsHide: true });
+   if (linux) {
+      const frame = await promisify(execFile)(
+         ffmpeg,
+         ["-v", "error", "-ss", "1", "-i", clip.path, "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+         { encoding: "buffer", maxBuffer: 4 * 1024 * 1024 }
+      );
+      assert(frame.stdout.length > 0, "The packaged capture must decode real pixels");
+      const mean = frame.stdout.reduce((sum, value) => sum + value, 0) / frame.stdout.length;
+      assert(mean > 10, "The packaged X11 fixture must appear in the captured frame");
+      for (const track of [0, 1]) {
+         const audio = await promisify(execFile)(ffmpeg, ["-hide_banner", "-i", clip.path, "-map", `0:a:${track}`, "-af", "volumedetect", "-f", "null", "-"]);
+         const level = /mean_volume: (-?[\d.]+) dB/.exec(audio.stderr)?.[1];
+         assert(level && Number(level) > -40 && Number(level) < -15, "The private tone must exist in both master and isolated capture audio");
+      }
+   }
    await page.evaluate((id) => window.attaClip.createShareable(id, 1), clip.id);
    await expect
       .poll(() => page.evaluate(async (id) => (await window.attaClip.state()).clips.find((item) => item.id === id)?.shareables.length, clip.id), {
