@@ -1,5 +1,40 @@
-import { describe, expect, it } from "vitest";
-import { checkRuntimeVersions } from "./assemble-source-evidence";
+import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { checkRuntimeVersions, copyNativeLicenses } from "./assemble-source-evidence";
+
+describe("controlled media notices in the runtime package", () => {
+   const folders: string[] = [];
+   afterEach(async () => {
+      await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })));
+   });
+   it("retains a compiled dependency's full copyright and license in the installer notices", async () => {
+      const project = await mkdtemp(path.join(os.tmpdir(), "attaclip-source-notices-"));
+      folders.push(project);
+      const directory = path.join(project, "work/release-sources");
+      const licensePath = "evidence/controlled-media/licenses/dav1d/COPYING";
+      const license = Buffer.from(
+         "Copyright (c) 2018, VideoLAN and dav1d authors\nAll rights reserved.\nRedistribution and use in source and binary forms...\n"
+      );
+      const source = path.join(directory, licensePath);
+      await mkdir(path.dirname(source), { recursive: true });
+      await writeFile(source, license);
+      await copyNativeLicenses(project, directory, [{ path: licensePath, sha256: createHash("sha256").update(license).digest("hex"), size: license.length }]);
+      expect(await readFile(path.join(project, "resources/notices/native", licensePath))).toEqual(license);
+      expect(await readFile(source)).toEqual(license);
+   });
+   it("rejects changed license text and paths outside the source kit", async () => {
+      const project = await mkdtemp(path.join(os.tmpdir(), "attaclip-source-notices-"));
+      folders.push(project);
+      const directory = path.join(project, "work/release-sources");
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, "COPYING"), "changed");
+      await expect(copyNativeLicenses(project, directory, [{ path: "COPYING", sha256: "original", size: 7 }])).rejects.toThrow("license changed");
+      await expect(copyNativeLicenses(project, directory, [{ path: "../COPYING", sha256: "original", size: 7 }])).rejects.toThrow("path escapes");
+   });
+});
 
 describe("actual OBS dependency identity", () => {
    const libraries = [

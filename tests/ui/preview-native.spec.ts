@@ -120,11 +120,35 @@ test("native capture survives preview teardown and saves the selected applicatio
       await promisify(execFile)(ffmpeg, ["-v", "error", "-i", clip.path, "-f", "null", "-"], { windowsHide: true });
       const pixel = await promisify(execFile)(
          ffmpeg,
-         ["-v", "error", "-ss", "1", "-i", clip.path, "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+         [
+            "-v",
+            "error",
+            "-ss",
+            "1",
+            "-i",
+            clip.path,
+            "-vf",
+            "crop=2:2:iw/2:ih/2,scale=1:1",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-c:v",
+            "png",
+            "-f",
+            "image2pipe",
+            "-",
+         ],
          { windowsHide: true, encoding: "buffer" }
       );
-      expect(pixel.stdout.length).toBe(3);
-      for (const [index, expected] of [228, 76, 102].entries()) expect(Math.abs(pixel.stdout[index]! - expected)).toBeLessThan(15);
+      const pixels = await desktop.evaluate(({ nativeImage }, encoded) => {
+         const image = nativeImage.createFromBuffer(Buffer.from(encoded, "base64"));
+         const bitmap = image.toBitmap();
+         if (image.getSize().width !== 1 || image.getSize().height !== 1 || bitmap.length !== 4) throw new Error("Expected one decoded pixel.");
+         return [bitmap[2]!, bitmap[1]!, bitmap[0]!];
+      }, pixel.stdout.toString("base64"));
+      expect(pixels.length).toBe(3);
+      for (const [index, expected] of [228, 76, 102].entries()) expect(Math.abs(pixels[index]! - expected)).toBeLessThan(15);
       const measurements = {
          visibleMetrics,
          hiddenMetrics,

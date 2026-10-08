@@ -36,6 +36,8 @@ Run `bun scripts/release-sources.ts --check` afterward. The checker rejects chan
 
 Run `bun scripts/package-source-kit.ts` after assembly and checking. It copies the referenced sources, licenses, and build evidence into a new folder, drops unused dependency research records, and validates that smaller kit against the current staging. It writes a source ZIP and SHA-256 record under `work`. The ZIP includes extraction and build instructions. It excludes Git caches and extracted runtime binaries.
 
+After rebuilding installers, run `bun scripts/verify-release.ts work/AttaClip-0.1.0-windows-x64-sources-<commit>.zip`. This gate recompiles the current clean source, compares its files with app.asar, verifies packaged resources and Electron files against the source kit, and extracts both installer payloads to compare every file with the checked unpacked application. It writes a release record and SHA256SUMS under release.
+
 Publish that source kit with the installer it covers. Preserve AttaCut's MIT notice and the full dependency notices in the package. General-purpose compilers and build tools do not require source archives in this kit. Development binary overrides do not establish public-release correspondence.
 
 [FFmpeg's legal page](https://ffmpeg.org/legal.html) explains its source, configuration, and external library obligations. Until the exact kit passes and its correspondence has been reviewed, installers stay unpublished. CI build reports and private verification artifacts remain available.

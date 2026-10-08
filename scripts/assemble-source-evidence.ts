@@ -11,6 +11,19 @@ type FileRecord = Evidence["components"][number]["sourceArchives"][number];
 type Source = SourceKit["sources"][number];
 type Dependency = NonNullable<SourceKit["dependencySources"]>[number];
 
+export async function copyNativeLicenses(project: string, directory: string, licenses: FileRecord[]): Promise<void> {
+   const nativeNotices = path.join(project, "resources/notices/native");
+   for (const license of licenses) {
+      const source = path.resolve(directory, license.path);
+      const target = path.resolve(nativeNotices, license.path);
+      if (!source.startsWith(`${path.resolve(directory)}${path.sep}`) || !target.startsWith(`${path.resolve(nativeNotices)}${path.sep}`))
+         throw new Error("Native license path escapes its source or notices folder.");
+      if ((await hashFile(source)) !== license.sha256) throw new Error(`Native license changed: ${license.path}`);
+      await mkdir(path.dirname(target), { recursive: true });
+      await copyFile(source, target);
+   }
+}
+
 interface ObsRuntimeProbe {
    file: string;
    sha256: string;
@@ -252,16 +265,9 @@ export async function assembleSourceEvidence(project: string): Promise<SourceKit
       ...compiled.flatMap((input) => input.licenses),
       ...embeddedNotices,
    ];
-   const nativeNotices = path.join(project, "resources/notices/native");
-   await mkdir(nativeNotices, { recursive: true });
    // Preserve source paths and full copyright notices in the actual installer.
    // Source-archive licenses are separate from the app's own GPL text.
-   for (const license of [...obsLicenses, ...electronFfmpeg.licenseFiles]) {
-      const target = path.resolve(nativeNotices, license.path);
-      if (!target.startsWith(`${path.resolve(nativeNotices)}${path.sep}`)) throw new Error("Native license path escapes the notices folder.");
-      await mkdir(path.dirname(target), { recursive: true });
-      await copyFile(path.join(directory, license.path), target);
-   }
+   await copyNativeLicenses(project, directory, [...obsLicenses, ...electronFfmpeg.licenseFiles]);
    add("obs-dependency-build-config", "OBS 32.2.2 / deps 2026-07-15", "GPL-2.0-or-later", obsArchives, obsLicenses, [
       recipes,
       obsConfiguration,
@@ -299,6 +305,7 @@ export async function assembleSourceEvidence(project: string): Promise<SourceKit
    const recordedFiles = await Promise.all(controlled.evidenceFiles.map((file) => fileRecord(path.join(controlledEvidence, file.path))));
    const buildInstructions = recordedFiles.filter((file) => /build-media-windows\.sh|mingw-cross\.ini|config|toolchain|build\.log|sha256/.test(file.path));
    const licenses = recordedFiles.filter((file) => /COPYING|LICENSE/.test(file.path));
+   await copyNativeLicenses(project, directory, licenses);
    add("ffmpeg-core-build-config", "8.1.3-attaclip-local", "GPL-2.0-or-later", controlled.sourceArchives, licenses, buildInstructions);
    add(
       "ffmpeg-external:libx264",
