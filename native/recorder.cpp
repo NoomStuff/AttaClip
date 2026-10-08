@@ -132,10 +132,11 @@ public:
       (context->microphone ? r->microphoneLevel : r->captureLevel) = value;
       uint64_t now = os_gettime_ns(), last = r->lastMeterEvent.load();
       if (r->active && now - last >= 200000000 &&
-          r->lastMeterEvent.compare_exchange_strong(last, now))
+          r->lastMeterEvent.compare_exchange_strong(last, now)) {
         emit({{"event", "audio-levels"},
               {"capture", r->captureLevel.load()},
               {"microphone", r->microphoneLevel.load()}});
+      }
     };
     obs_volmeter_add_callback(captureMeter, callback, &captureContext);
     obs_volmeter_add_callback(microphoneMeter, callback, &microphoneContext);
@@ -740,9 +741,6 @@ public:
     setAudio({{"source", "microphone"},
               {"volume", microphoneVolume},
               {"muted", microphoneMuted}});
-    fprintf(stderr, "AttaClip capture audio active=%d muted=%d volume=%f flags=%u\n",
-            obs_source_active(desktop), obs_source_muted(desktop),
-            obs_source_get_volume(desktop), obs_source_get_output_flags(desktop));
     d = obs_data_create();
     obs_data_set_string(d, "rate_control", "CQP");
     obs_data_set_int(d, "cqp", cq);
@@ -750,10 +748,22 @@ public:
     obs_data_set_int(d, "keyint_sec", 1);
     obs_data_set_int(d, "bf", 0);
     const char *id = nullptr;
+    encoder.clear();
     for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
       if (std::string(id) == "obs_nvenc_h264_tex" ||
           std::string(id) == "obs_nvenc_h264")
         encoder = id;
+    if (encoder.empty() && c.value("allowSoftwareEncoder", false)) {
+      for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
+        if (std::string(id) == "obs_x264")
+          encoder = id;
+      if (!encoder.empty()) {
+        obs_data_set_string(d, "rate_control", "CRF");
+        obs_data_set_int(d, "crf", cq);
+        obs_data_set_string(d, "preset", "veryfast");
+        obs_data_set_string(d, "x264opts", "bframes=0");
+      }
+    }
     if (encoder.empty())
       throw std::runtime_error(
           "No supported hardware H.264 encoder is available. Software "

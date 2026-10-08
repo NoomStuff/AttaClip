@@ -35,8 +35,8 @@ public class TonePlayer {
  [DllImport("winmm.dll")] static extern uint waveOutReset(IntPtr handle);
  [DllImport("winmm.dll")] static extern uint waveOutClose(IntPtr handle);
  public static void Play(string file) {
-  uint id=0xffffffff; for(uint i=0;i<waveOutGetNumDevs();i++){Caps caps;waveOutGetDevCapsW((UIntPtr)i,out caps,(uint)Marshal.SizeOf(typeof(Caps))); Console.WriteLine(caps.name); if(caps.name.Contains("2475W1"))id=i;}
-  if(id==0xffffffff)throw new Exception("The explicit loopback test output was not found");
+  uint id=0xffffffff; string requested=Environment.GetEnvironmentVariable("ATTACLIP_TEST_AUDIO_DEVICE_NAME");
+  if(!String.IsNullOrEmpty(requested)){for(uint i=0;i<waveOutGetNumDevs();i++){Caps caps;waveOutGetDevCapsW((UIntPtr)i,out caps,(uint)Marshal.SizeOf(typeof(Caps))); if(caps.name.Contains(requested))id=i;} if(id==0xffffffff)throw new Exception("The requested loopback test output was not found");}
   byte[] wav=File.ReadAllBytes(file); int offset=12; while(System.Text.Encoding.ASCII.GetString(wav,offset,4)!="data")offset+=8+BitConverter.ToInt32(wav,offset+4); int count=BitConverter.ToInt32(wav,offset+4); offset+=8;
   IntPtr memory=Marshal.AllocHGlobal(count); Marshal.Copy(wav,offset,memory,count);
   var format=new Format{tag=1,channels=2,samples=48000,bytes=192000,align=4,bits=16,size=0}; IntPtr handle;
@@ -135,7 +135,10 @@ try {
       assert.deepEqual(result.streams[0], { width: 640, height: 360, r_frame_rate: "24/1" });
    }
    const full = measurements["full"]!;
-   assert(full[0]! > -55, `The loopback did not receive the generated tone: ${JSON.stringify(measurements)}`);
+   assert(
+      full[0]! > -55,
+      `The loopback did not receive the generated tone. Check that the default playback output is unmuted and audible. ${JSON.stringify(measurements)}`
+   );
    for (let track = 0; track < 2; track++) {
       for (const half of ["initial-half", "half-after-switch"])
          assert(Math.abs(full[track]! - measurements[half]![track]! - 6.02) < 1, JSON.stringify(measurements));

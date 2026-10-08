@@ -123,6 +123,15 @@ export class Recorder {
       });
       const root = path.dirname(executable);
       this.process = spawn(executable, [root], { cwd: root, windowsHide: true, stdio: "pipe" });
+      this.process.stdin.on("error", (error: Error) => {
+         this.readyReject?.(error);
+         for (const command of this.commands.values()) {
+            clearTimeout(command.timeout);
+            command.reject(new Error("The recording helper connection closed"));
+         }
+         this.commands.clear();
+         this.error("The recording helper connection closed");
+      });
       createInterface({ input: this.process.stdout }).on("line", (line: string) => {
          try {
             const value: unknown = JSON.parse(line);

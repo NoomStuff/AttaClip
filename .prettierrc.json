@@ -4,7 +4,7 @@
    "trailingComma": "es5",
    "printWidth": 160,
    "tabWidth": 3,
-   "endOfLine": "crlf",
+   "endOfLine": "lf",
    "bracketSameLine": false,
    "jsxSingleQuote": false
 }

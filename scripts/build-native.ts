@@ -92,7 +92,21 @@ const generated = path.join(root, "native", "generated");
 await writeFile(path.join(generated, "obs.def"), `LIBRARY obs\nEXPORTS\n${exports.join("\n")}\n`);
 run(path.join(tools, "lib.exe"), [`/def:${path.join(generated, "obs.def")}`, `/out:${path.join(generated, "obs.lib")}`, "/machine:x64"]);
 await writeFile(path.join(generated, "obsconfig.h"), "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n");
-const generator = installation.includes("2019") ? "Visual Studio 16 2019" : "Visual Studio 17 2022";
+const visualStudioVersion = Number(
+   run(vswhere, ["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationVersion"])
+      .trim()
+      .split(".")[0]
+);
+const generator =
+   visualStudioVersion === 16
+      ? "Visual Studio 16 2019"
+      : visualStudioVersion === 17
+        ? "Visual Studio 17 2022"
+        : visualStudioVersion === 18
+          ? "Visual Studio 18 2026"
+          : "";
+if (!generator || !run("cmake", ["--help"]).includes(generator))
+   throw new Error(`CMake does not support the installed Visual Studio ${visualStudioVersion}. Update CMake or use a supported C++ toolchain`);
 run("cmake", [
    "-S",
    path.join(root, "native"),
@@ -132,7 +146,7 @@ const binaries = [
    "obs-nvenc-test.exe",
 ];
 for (const name of binaries) await copyFile(path.join(bin, name), path.join(runtime, name));
-const modules = ["win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc"];
+const modules = ["win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc", "obs-x264"];
 await mkdir(path.join(runtime, "obs-plugins", "64bit"), { recursive: true });
 for (const name of modules) {
    await copyFile(path.join(obs, "obs-plugins", "64bit", `${name}.dll`), path.join(runtime, "obs-plugins", "64bit", `${name}.dll`));
@@ -149,7 +163,7 @@ await writeFile(
          source: `https://github.com/obsproject/obs-studio/tree/${version}`,
          build: "scripts/build-native.ts",
          modules,
-         encoder: "NVENC H.264",
+         encoder: "NVENC H.264, explicit x264 software fallback",
          format: "Matroska",
          platform: "Windows x64",
          runtimeArchive: process.env["ATTACLIP_OBS_ROOT"]
