@@ -1,0 +1,33 @@
+name: Checks
+on:
+   push:
+      branches: [main]
+   pull_request:
+   workflow_dispatch:
+permissions:
+   contents: read
+concurrency:
+   group: checks-${{ github.ref }}
+   cancel-in-progress: true
+jobs:
+   verify:
+      runs-on: windows-2025
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - run: bun install --frozen-lockfile
+         - run: bun scripts/provision-media.ts
+         - run: bun run bundle:media
+         - run: bun run build:icons
+         - run: bun run verify
+         - run: bun run test:media
+         - run: bun run test:ui
+         - uses: actions/upload-artifact@v7
+           if: always()
+           with:
+              name: ui-verification
+              path: test-results/
+              retention-days: 7

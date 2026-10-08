@@ -1,0 +1,16 @@
+node_modules
+out
+release
+resources/media
+work
+test-results
+bun.lock
+
+native
+resources/recorder
+build
+.cache
+playwright-report
+64bit
+build-report
+

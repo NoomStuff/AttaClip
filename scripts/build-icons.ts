@@ -1,0 +1,17 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import sharp from "sharp";
+import pngToIco from "png-to-ico";
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 256 256"><rect x="8" y="8" width="240" height="240" rx="58" fill="#151219"/><g fill="none" stroke="#b197fc" stroke-width="13" stroke-linejoin="round"><path d="M64 110h131v79a13 13 0 0 1-13 13H77a13 13 0 0 1-13-13z"/><path d="m63 106-7-30 128-31 7 30z"/><path d="m83 70 21 26m17-36 21 27m17-36 22 27"/></g><path d="m115 133 37 22-37 22z" fill="#b197fc"/></svg>`;
+await mkdir("build", { recursive: true });
+await writeFile("build/icon.svg", svg);
+const png = await sharp(Buffer.from(svg)).png().toBuffer();
+await writeFile("build/icon.png", png);
+await writeFile("build/icon.ico", await pngToIco(await sharp(png).resize(256, 256).toBuffer()));
+const element = Buffer.alloc(8);
+element.write("ic10");
+element.writeUInt32BE(png.length + 8, 4);
+const header = Buffer.alloc(8);
+header.write("icns");
+header.writeUInt32BE(png.length + 16, 4);
+await writeFile("build/icon.icns", Buffer.concat([header, element, png]));
+console.log("Generated AttaClip icons.");

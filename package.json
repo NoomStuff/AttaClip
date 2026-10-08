@@ -1,0 +1,134 @@
+{
+   "name": "attaclip",
+   "version": "0.1.0",
+   "description": "Save the moment. Keep it yours.",
+   "license": "GPL-3.0-or-later",
+   "type": "module",
+   "main": "out/main/index.js",
+   "author": "NoomStuff",
+   "scripts": {
+      "dev": "electron-vite dev",
+      "build": "bun run typecheck && electron-vite build",
+      "typecheck": "tsc --noEmit",
+      "test": "vitest run",
+      "format": "prettier --write .",
+      "format:check": "prettier --check .",
+      "lint": "eslint . --max-warnings 0",
+      "verify": "bun run format:check && bun run lint && bun run test && bun run build",
+      "test:ui": "bun run build && playwright test",
+      "test:media": "bun tests/media.ts",
+      "test:packaged": "bun tests/packaged.ts",
+      "test:native": "bun scripts/smoke-recorder.ts",
+      "build:icons": "bun scripts/build-icons.ts",
+      "bundle:media": "bun scripts/bundle-media.ts",
+      "build:native": "bun scripts/build-native.ts",
+      "dist": "bun run build:icons && bun run build && electron-builder",
+      "package": "bun run build:icons && bun run build && electron-builder --dir"
+   },
+   "build": {
+      "appId": "dev.attaclip.app",
+      "productName": "AttaClip",
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+      "directories": {
+         "output": "release"
+      },
+      "files": [
+         "out/**/*",
+         "package.json"
+      ],
+      "extraResources": [
+         {
+            "from": "resources/media",
+            "to": "media"
+         },
+         {
+            "from": "resources/recorder",
+            "to": "recorder"
+         },
+         {
+            "from": "LICENSE",
+            "to": "LICENSE"
+         },
+         {
+            "from": "THIRD_PARTY_NOTICES.md",
+            "to": "THIRD_PARTY_NOTICES.md"
+         },
+         {
+            "to": "icons/icon.png",
+            "from": "build/icon.png"
+         },
+         {
+            "to": "LICENSE-AttaCut",
+            "from": "LICENSE-AttaCut"
+         }
+      ],
+      "win": {
+         "icon": "build/icon.ico",
+         "target": [
+            "nsis",
+            "portable"
+         ],
+         "signExecutable": false
+      },
+      "nsis": {
+         "oneClick": false,
+         "allowToChangeInstallationDirectory": true,
+         "artifactName": "${productName}-${version}-${os}-${arch}-Installer.${ext}"
+      },
+      "mac": {
+         "icon": "build/icon.icns",
+         "target": [
+            "dmg",
+            "zip"
+         ],
+         "category": "public.app-category.video",
+         "extendInfo": {
+            "NSMicrophoneUsageDescription": "Record your microphone in clips when you enable it.",
+            "NSScreenCaptureUsageDescription": "Capture the screen or application you select."
+         }
+      },
+      "linux": {
+         "icon": "build/icon.png",
+         "target": [
+            "AppImage"
+         ],
+         "category": "AudioVideo"
+      },
+      "publish": [
+         {
+            "provider": "github",
+            "owner": "NoomStuff",
+            "repo": "AttaClip"
+         }
+      ]
+   },
+   "dependencies": {
+      "electron-updater": "^6.7.3",
+      "lucide-react": "^1.52.0",
+      "react": "^19.3.0",
+      "react-dom": "^19.3.0",
+      "zod": "^4.6.5"
+   },
+   "devDependencies": {
+      "@eslint/js": "^10.0.1",
+      "@playwright/test": "^1.63.0",
+      "@swc/core": "^1.16.13",
+      "@types/node": "^26.6.2",
+      "@types/react": "^19.3.0",
+      "@types/react-dom": "^19.3.0",
+      "@types/semver": "^7.8.0",
+      "@vitejs/plugin-react": "^5.2.0",
+      "electron": "^44.4.5",
+      "electron-builder": "^26.15.3",
+      "electron-vite": "^5.0.0",
+      "eslint": "^10.11.0",
+      "eslint-plugin-react-hooks": "^7.1.1",
+      "png-to-ico": "^3.0.2",
+      "prettier": "^3.9.9",
+      "sharp": "^0.35.4",
+      "typescript": "~6.0.3",
+      "typescript-eslint": "^8.70.1",
+      "vite": "^7.3.6",
+      "vitest": "^5.0.1"
+   }
+}

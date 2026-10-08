@@ -1,0 +1,44 @@
+name: Desktop builds
+on:
+   workflow_dispatch:
+   push:
+      tags: ["v*"]
+permissions:
+   contents: read
+jobs:
+   package:
+      strategy:
+         fail-fast: false
+         matrix:
+            os: [windows-2025, ubuntu-24.04, macos-15]
+      runs-on: ${{ matrix.os }}
+      timeout-minutes: 45
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - run: bun install --frozen-lockfile
+         - run: bun scripts/provision-media.ts
+         - run: bun run bundle:media
+         - run: bun run build:icons
+         - name: Build application
+           run: bun run build
+         - name: Build recorder
+           run: bun run build:native
+         - name: Package without automatic publishing
+           run: bunx electron-builder --publish never
+           env:
+              CSC_IDENTITY_AUTO_DISCOVERY: "false"
+         - name: Record build details
+           shell: bash
+           run: |
+              mkdir -p build-report
+              cp resources/media/provenance.json build-report/media-provenance.json
+              cp resources/recorder/provenance.json build-report/recorder-provenance.json 2>/dev/null || cp resources/recorder/UNAVAILABLE.txt build-report/recorder-status.txt
+              find release -maxdepth 1 -type f -print > build-report/artifacts.txt
+         - uses: actions/upload-artifact@v7
+           with:
+              name: build-report-${{ runner.os }}
+              path: build-report/
+              retention-days: 14
