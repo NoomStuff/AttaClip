@@ -12,9 +12,13 @@ public static class AttaClipObsSourceProbe {
 }
 '@
 if (![AttaClipObsSourceProbe]::SetDllDirectory($runtime)) { throw 'Could not select staged OBS library directory.' }
+$probeHasher = [Security.Cryptography.SHA256]::Create()
+$probeStream = [IO.File]::OpenRead((Join-Path $runtime 'avcodec-62.dll'))
+try { $probeDigest = [BitConverter]::ToString($probeHasher.ComputeHash($probeStream)).Replace('-', '').ToLowerInvariant() }
+finally { $probeStream.Dispose(); $probeHasher.Dispose() }
 $result = [ordered]@{
   file = 'avcodec-62.dll'
-  sha256 = (Get-FileHash -LiteralPath (Join-Path $runtime 'avcodec-62.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+  sha256 = $probeDigest
   version = [AttaClipObsSourceProbe]::avcodec_version()
   configuration = [Runtime.InteropServices.Marshal]::PtrToStringAnsi([AttaClipObsSourceProbe]::avcodec_configuration())
 }
