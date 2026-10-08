@@ -10,6 +10,8 @@ taskBuildRoot=${ATTACLIP_MEDIA_BUILD_ROOT:-$(mktemp -d -t attaclip-media.XXXXXX)
 taskJobs=${ATTACLIP_MEDIA_BUILD_JOBS:-4}
 taskPrefix="$taskBuildRoot/prefix"
 mkdir -p "$taskOutput" "$taskBuildRoot" "$taskPrefix"
+# A rebuild must not retain verification records for the previous executables.
+rm -f "$taskOutput/build-manifest.json" "$taskOutput/verification/codecs.json"
 exec > >(tee "$taskOutput/build.log") 2>&1
 printf '%s\n' "$taskBuildRoot" > "$taskOutput/build-root.txt"
 
@@ -17,13 +19,23 @@ taskFfmpegArchive="$taskSources/ffmpeg-btbn-core-29e619e767cde9045a75c29bc9a8278
 taskX264Archive="$taskSources/dependencies/02ba10fe849198a6-x264.tar.gz"
 taskDav1dArchive="$taskSources/dependencies/35c9455c121eed5d-dav1d.tar.gz"
 taskZlibArchive="$taskSources/dependencies/63e292ea77c8d4d2-zlib.tar.gz"
-cat > "$taskOutput/source-sha256.txt" <<EOF
-8e4699bcb6a311772e8f513cc72ce27328891b82a598b82e7cff3dfe580875a0  $taskFfmpegArchive
-d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50  $taskX264Archive
-8c243fbc9d12019ee86785362db620c8bf66440778bd2232de0c4e9a4a54b6f0  $taskDav1dArchive
-d9e270d46252734aa49770fbc544125391617956266f220bd63216c834f3a522  $taskZlibArchive
-EOF
-sha256sum --check "$taskOutput/source-sha256.txt"
+# Pin the entire tar, including its source bytes and metadata. Git and archive
+# servers can use different gzip encoders without changing that input.
+verify_source_tar() {
+  local archive=$1 expected=$2 actual
+  actual=$(gzip -cd "$archive" | sha256sum | cut -d' ' -f1)
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'Source contents changed: %s, expected %s, received %s\n' "$archive" "$expected" "$actual" >&2
+    exit 1
+  fi
+  printf '%s  %s\n' "$actual" "$archive" >> "$taskOutput/source-tar-sha256.txt"
+}
+: > "$taskOutput/source-tar-sha256.txt"
+verify_source_tar "$taskFfmpegArchive" e4febb1b201585dac61239258f5c2750e3ed7197e2d41d380385ff87fe2f92b0
+verify_source_tar "$taskX264Archive" 5686546d663e7520bd05cd47a31d615d0dc707c089cfcb5924a1bcfd3aea7be5
+verify_source_tar "$taskDav1dArchive" 86f69f5dd9a63c9f6bd6ba7f3b0172c89cf936559ba396dda40eba7a4e31e7a9
+verify_source_tar "$taskZlibArchive" c26b1af0562377fe129e26be73e8adf50a2ac9250c2523fa5805bdbca47fabc7
+sha256sum "$taskFfmpegArchive" "$taskX264Archive" "$taskDav1dArchive" "$taskZlibArchive" > "$taskOutput/source-sha256.txt"
 
 for tool in x86_64-w64-mingw32-gcc-posix x86_64-w64-mingw32-g++-posix x86_64-w64-mingw32-ar nasm meson ninja pkg-config make; do
   command -v "$tool"

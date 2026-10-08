@@ -3,6 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createGunzip } from "node:zlib";
 import type { ControlledMediaBuild } from "./controlled-media";
 
 interface SourcePin {
@@ -49,6 +50,10 @@ interface DependencySource extends HashedFile {
    downloadUrl: string;
    licenses: HashedFile[];
    review: string[];
+}
+interface ArchiveExportOptions {
+   prefix: string;
+   crlf: boolean;
 }
 export interface SourceKit {
    version: 1;
@@ -236,7 +241,7 @@ function runAsync(command: string, args: string[], timeoutMs = 120_000): Promise
    });
 }
 
-async function exportRepository(ref: DependencyRecipeRef, file: string, directory: string): Promise<string> {
+async function exportRepository(ref: DependencyRecipeRef, file: string, directory: string, archiveOptions?: ArchiveExportOptions): Promise<string> {
    const uri = new URL(ref.uri);
    if (uri.protocol !== "https:" || uri.username || uri.password) throw new Error("Source exports require a public HTTPS repository.");
    const key = createHash("sha256").update(`${ref.uri}@${ref.revision}`).digest("hex").slice(0, 16);
@@ -282,17 +287,35 @@ async function exportRepository(ref: DependencyRecipeRef, file: string, director
       const names = (await runAsync("git", ["-C", git, "ls-tree", "--name-only", commit])).trim().split(/\r?\n/);
       subset.push(...names.filter((name) => /^licen[cs]e|^copying/i.test(name)));
    }
-   // Match the captured Windows Git export on other build hosts too. Git archive
-   // applies text conversion, so leaving autocrlf implicit changes input hashes.
+   // Text conversion and the archive prefix are part of the captured input.
+   // Gzip compression itself may differ between Git builds, so controlled inputs
+   // also pin the complete uncompressed tar below.
    await runAsync(
       "git",
-      ["-c", "core.autocrlf=true", "-C", git, "archive", "--format=tar.gz", `--prefix=source-${commit}/`, `--output=${file}`, commit, ...subset],
+      [
+         "-c",
+         `core.autocrlf=${archiveOptions?.crlf ?? true}`,
+         "-C",
+         git,
+         "archive",
+         "--format=tar.gz",
+         `--prefix=${archiveOptions?.prefix ?? "source"}-${commit}/`,
+         `--output=${file}`,
+         commit,
+         ...subset,
+      ],
       180_000
    );
    return commit;
 }
 
-async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, directory: string): Promise<DependencySource> {
+export async function collectDependency(
+   ref: DependencyRecipeRef,
+   kit: SourceKit,
+   directory: string,
+   forceRepositoryExport = false,
+   archiveOptions?: ArchiveExportOptions
+): Promise<DependencySource> {
    const recipeArchive = kit.sources.find((source) => source.repository === ref.provider);
    if (!recipeArchive) throw new Error("Pinned recipe archive missing.");
    const recipeText = run("tar", ["-xOzf", path.join(directory, recipeArchive.path), ref.recipe]);
@@ -301,7 +324,7 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
    const uri = new URL(ref.uri);
    let url = ref.uri;
    let extension = ".tar.gz";
-   let repositoryExport = false;
+   let repositoryExport = forceRepositoryExport;
    let exportedRevision: string | undefined;
    if (uri.pathname === "/GPUOpen-LibrariesAndSDKs/AMF.git") repositoryExport = true;
    if (revision.startsWith("${PSScriptRoot}/")) {
@@ -337,7 +360,7 @@ async function collectDependency(ref: DependencyRecipeRef, kit: SourceKit, direc
    const folder = path.join(directory, "dependencies");
    await mkdir(folder, { recursive: true });
    const file = path.join(folder, name);
-   if (repositoryExport) exportedRevision = await exportRepository(ref, file, directory);
+   if (repositoryExport) exportedRevision = await exportRepository(ref, file, directory, archiveOptions);
    else if (!existsSync(file)) {
       const temporary = `${file}.download`;
       await runAsync(process.platform === "win32" ? "curl.exe" : "curl", [
@@ -437,22 +460,39 @@ async function collectDependencies(kit: SourceKit, directory: string, project: s
    await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify(kit, null, 2)}\n`);
 }
 
-async function collectControlledInputs(kit: SourceKit, directory: string): Promise<void> {
-   const inputs = [
+export async function hashTarContents(file: string): Promise<string> {
+   const hash = createHash("sha256");
+   const input = createReadStream(file);
+   const tar = createGunzip();
+   input.on("error", (error) => tar.destroy(error));
+   input.pipe(tar);
+   try {
+      for await (const chunk of tar) hash.update(chunk as Buffer);
+      return hash.digest("hex");
+   } finally {
+      input.destroy();
+      tar.destroy();
+   }
+}
+
+export async function collectControlledInputs(kit: SourceKit, directory: string): Promise<void> {
+   const inputs: { origin: string; commit: string; tarSha256: string; archiveOptions?: ArchiveExportOptions }[] = [
       {
          origin: "https://code.videolan.org/videolan/x264.git",
          commit: "0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee",
-         sha256: "d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50",
+         tarSha256: "5686546d663e7520bd05cd47a31d615d0dc707c089cfcb5924a1bcfd3aea7be5",
+         archiveOptions: { prefix: "x264", crlf: false },
       },
       {
          origin: "https://code.videolan.org/videolan/dav1d.git",
          commit: "9711965b60bb692ae24004659acf61f5c7d9ed61",
-         sha256: "8c243fbc9d12019ee86785362db620c8bf66440778bd2232de0c4e9a4a54b6f0",
+         tarSha256: "86f69f5dd9a63c9f6bd6ba7f3b0172c89cf936559ba396dda40eba7a4e31e7a9",
+         archiveOptions: { prefix: "source", crlf: true },
       },
       {
          origin: "https://github.com/madler/zlib.git",
          commit: "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
-         sha256: "d9e270d46252734aa49770fbc544125391617956266f220bd63216c834f3a522",
+         tarSha256: "c26b1af0562377fe129e26be73e8adf50a2ac9250c2523fa5805bdbca47fabc7",
       },
    ];
    kit.dependencySources ??= [];
@@ -461,11 +501,16 @@ async function collectControlledInputs(kit: SourceKit, directory: string): Promi
       if (!source) {
          const ref = kit.dependencyRecipeRefs?.find((item) => item.uri === input.origin && item.revision === input.commit);
          if (!ref) throw new Error(`Controlled input is absent from pinned recipes: ${input.origin}`);
-         source = await collectDependency(ref, kit, directory);
+         // Reproduce each captured tar's prefix and text conversion. HTTP archive
+         // access differs between hosts, so these inputs always use Git exports.
+         source = await collectDependency(ref, kit, directory, !!input.archiveOptions, input.archiveOptions);
          kit.dependencySources.push(source);
       }
-      if (source.sha256 !== input.sha256 || (await hashFile(path.join(directory, source.path))) !== input.sha256)
-         throw new Error(`Controlled source checksum changed: ${input.origin}`);
+      const file = path.join(directory, source.path);
+      if ((await hashFile(file)) !== source.sha256) throw new Error(`Captured archive changed: ${input.origin}`);
+      const tarDigest = await hashTarContents(file);
+      if (tarDigest !== input.tarSha256)
+         throw new Error(`Controlled source contents changed: ${input.origin}, expected ${input.tarSha256}, received ${tarDigest}`);
    }
    await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify(kit, null, 2)}\n`);
 }

@@ -2,10 +2,30 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { describe, it, expect } from "vitest";
-import { hashFile, inventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
+import { hashFile, hashTarContents, inventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
 
 describe("release source evidence", () => {
+   it("pins source contents across gzip encoders and rejects damaged archives", async () => {
+      const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-source-content-"));
+      try {
+         const source = Buffer.from("captured source bytes\n".repeat(1000));
+         const fast = gzipSync(source, { level: 1 });
+         const compact = gzipSync(source, { level: 9 });
+         expect(fast.equals(compact)).toBe(false);
+         const files = [path.join(folder, "fast.tar.gz"), path.join(folder, "compact.tar.gz")];
+         await Promise.all([writeFile(files[0]!, fast), writeFile(files[1]!, compact)]);
+         const expected = createHash("sha256").update(source).digest("hex");
+         expect(await Promise.all(files.map(hashTarContents))).toEqual([expected, expected]);
+         await writeFile(files[1]!, gzipSync(Buffer.concat([source, Buffer.from("changed")])));
+         expect(await hashTarContents(files[1]!)).not.toBe(expected);
+         await writeFile(files[0]!, "not a gzip archive");
+         await expect(hashTarContents(files[0]!)).rejects.toThrow();
+      } finally {
+         await rm(folder, { recursive: true, force: true });
+      }
+   });
    it("follows declared library dependencies and grouped private prerequisites", () => {
       const base = { provider: "BtbN/FFmpeg-Builds", uri: "https://github.com/test/library.git", revision: "abc", version: "" };
       const refs = [

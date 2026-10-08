@@ -19,6 +19,8 @@
 #ifdef __linux__
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
+#include <pthread.h>
+#include <signal.h>
 #endif
 #ifdef _WIN32
 #include <objbase.h>
@@ -98,6 +100,7 @@ struct Request {
 };
 struct Job {
   Request request;
+  int width = 0, height = 0, fps = 0;
   double secondsSinceCapture = 0;
   std::string source;
   std::vector<Packet> packets;
@@ -375,6 +378,9 @@ public:
         }
     Job j;
     j.request = r;
+    j.width = width;
+    j.height = height;
+    j.fps = fps;
     j.secondsSinceCapture = std::max(0., double(r.end - end) / 1000000.);
     j.source = r.source;
     for (size_t i = start; i < ring.size(); i++)
@@ -454,6 +460,12 @@ public:
         j = std::move(jobs.front());
         jobs.pop_front();
       }
+      if (auto *gate = std::getenv("ATTACLIP_NATIVE_TEST_WRITER_GATE")) {
+        // A bounded test gate reproduces profile changes while an accepted
+        // original is still queued. Normal recording never waits here.
+        for (int i = 0; i < 1000 && !std::filesystem::exists(gate); i++)
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
       bool okay = false;
       std::string temp = j.request.path + ".saving.mkv";
       auto *args = os_process_args_create(muxExecutable.c_str());
@@ -465,11 +477,11 @@ public:
       add(std::to_string(j.headers.size() - 1));
       add("h264");
       add("10000");
-      add(std::to_string(width));
-      add(std::to_string(height));
+      add(std::to_string(j.width));
+      add(std::to_string(j.height));
       for (auto v : {1, 1, 1, 1, 1, 0})
         add(std::to_string(v));
-      add(std::to_string(fps));
+      add(std::to_string(j.fps));
       add("1");
       add("0");
       if (j.headers.size() > 1) {
@@ -887,6 +899,13 @@ Recorder *recorder = nullptr;
 int main(int argc, char **argv) {
   try {
 #ifdef __linux__
+    // Match OBS's frontend: a failed mux pipe is a save failure, never a
+    // SIGPIPE termination of the capture process and its retained footage.
+    sigset_t brokenPipe{};
+    sigemptyset(&brokenPipe);
+    sigaddset(&brokenPipe, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &brokenPipe, nullptr) != 0)
+      throw std::runtime_error("Could not configure recorder pipe handling");
     if (!XInitThreads()) throw std::runtime_error("X11 thread initialization failed");
 #endif
     base_set_log_handler(logger, nullptr);

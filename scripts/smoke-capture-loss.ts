@@ -10,6 +10,8 @@ const runtime = path.resolve("resources/recorder");
 const folder = path.resolve(".cache/native-loss", randomUUID());
 await mkdir(folder, { recursive: true });
 const title = `AttaClip capture fixture ${randomUUID()}`;
+const profileSwitch = Boolean(process.env["ATTACLIP_TEST_PROFILE_SWITCH"]);
+const writerGate = path.join(folder, "writer-ready");
 const appAudio = Boolean(process.env["ATTACLIP_TEST_APP_AUDIO"]);
 const tonePath = path.join(folder, "fixture-tone.wav");
 if (appAudio) {
@@ -63,11 +65,18 @@ interface NativeEvent {
    previousFootage?: boolean;
    secondsSinceCapture?: number;
    availableSeconds?: number;
+   active?: boolean;
+   pendingSaves?: number;
    message?: string;
 }
 const events: NativeEvent[] = [];
 const logs: string[] = [];
-const helper = spawn(path.join(runtime, "attaclip-recorder.exe"), [runtime], { cwd: runtime, windowsHide: true, stdio: "pipe" });
+const helper = spawn(path.join(runtime, "attaclip-recorder.exe"), [runtime], {
+   cwd: runtime,
+   windowsHide: true,
+   stdio: "pipe",
+   env: { ...process.env, ...(profileSwitch ? { ATTACLIP_NATIVE_TEST_WRITER_GATE: writerGate } : {}) },
+});
 helper.stderr.on("data", (value: Buffer) => logs.push(value.toString()));
 createInterface({ input: helper.stdout }).on("line", (line) => events.push(JSON.parse(line) as NativeEvent));
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,22 +90,36 @@ async function wait(predicate: (event: NativeEvent) => boolean, after = 0): Prom
    }
    throw new Error(`Native event timed out: ${JSON.stringify(events)}`);
 }
-async function command(value: Record<string, unknown>): Promise<void> {
+async function command(value: Record<string, unknown>, expected = "response"): Promise<NativeEvent> {
    const id = randomUUID();
    helper.stdin.write(`${JSON.stringify({ ...value, id })}\n`);
    const result = await wait((event) => event.id === id);
-   assert.equal(result.event, "response", result.message ?? "Native command failed");
+   assert.equal(result.event, expected, result.message ?? "Native command failed");
+   return result;
 }
-async function verify(name: string, minimumDuration: number): Promise<NativeEvent> {
+async function verify(name: string, minimumDuration: number, requested = false, width = 640, height = 360, fps = 24): Promise<NativeEvent> {
    const file = path.join(folder, `${name}.mkv`);
-   await command({ action: "save", requestId: name, requestedAt: Date.now(), path: file });
+   if (!requested) await command({ action: "save", requestId: name, requestedAt: Date.now(), path: file });
    const saved = await wait((event) => event.event === "saved" && event.requestId === name);
-   const probe = spawnSync(path.resolve("resources/media/ffprobe.exe"), ["-v", "error", "-show_entries", "format=duration", "-of", "json", file], {
-      encoding: "utf8",
-      windowsHide: true,
-   });
+   const probe = spawnSync(
+      path.resolve("resources/media/ffprobe.exe"),
+      ["-v", "error", "-show_entries", "format=duration:stream=width,height,r_frame_rate:stream_tags=DURATION", "-of", "json", file],
+      {
+         encoding: "utf8",
+         windowsHide: true,
+      }
+   );
    assert.equal(probe.status, 0, probe.stderr);
-   const duration = Number((JSON.parse(probe.stdout) as { format: { duration: string } }).format.duration);
+   const media = JSON.parse(probe.stdout) as {
+      format: { duration: string };
+      streams: Array<{ width?: number; height?: number; r_frame_rate?: string; tags?: { DURATION?: string } }>;
+   };
+   const duration = Number(media.format.duration);
+   assert.deepEqual([media.streams[0]?.width, media.streams[0]?.height, media.streams[0]?.r_frame_rate], [width, height, `${fps}/1`]);
+   const seconds = (value: string): number => value.split(":").reduce((total, entry) => total * 60 + Number(entry), 0);
+   const videoEnd = seconds(media.streams[0]?.tags?.DURATION ?? "0");
+   for (const audio of media.streams.slice(1))
+      assert(Math.abs(videoEnd - seconds(audio.tags?.DURATION ?? "0")) < 0.15, `${name}: audio/video endpoints diverged`);
    assert(duration > minimumDuration && duration < 3.2, `${name}: wrong duration ${duration}`);
    const decode = spawnSync(path.resolve("resources/media/ffmpeg.exe"), ["-v", "error", "-i", file, "-f", "null", "-"], {
       encoding: "utf8",
@@ -105,14 +128,14 @@ async function verify(name: string, minimumDuration: number): Promise<NativeEven
    assert.equal(decode.status, 0, decode.stderr);
    const pixel = spawnSync(
       path.resolve("resources/media/ffmpeg.exe"),
-      ["-v", "error", "-ss", "0.4", "-i", file, "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-      { windowsHide: true }
+      ["-v", "error", "-ss", "0.4", "-i", file, "-vf", "crop=2:2:iw/2:ih/2,signalstats,metadata=print:file=-", "-frames:v", "1", "-an", "-f", "null", "-"],
+      { windowsHide: true, encoding: "utf8" }
    );
-   assert.equal(pixel.status, 0, pixel.stderr.toString());
-   assert(
-      pixel.stdout.length === 3 && pixel.stdout[0]! < 60 && pixel.stdout[1]! > 80 && pixel.stdout[2]! > 130,
-      `${name}: expected the blue fixture, got ${[...pixel.stdout]}`
-   );
+   assert.equal(pixel.status, 0, pixel.stderr);
+   const y = Number(/lavfi.signalstats.YAVG=([\d.]+)/.exec(pixel.stdout)?.[1]);
+   const u = Number(/lavfi.signalstats.UAVG=([\d.]+)/.exec(pixel.stdout)?.[1]);
+   const v = Number(/lavfi.signalstats.VAVG=([\d.]+)/.exec(pixel.stdout)?.[1]);
+   assert(y > 40 && y < 160 && u > 140 && v < 140, `${name}: expected the blue fixture, got YUV ${y},${u},${v}`);
    if (appAudio) {
       for (const track of [0, 1]) {
          const measured = spawnSync(
@@ -143,16 +166,68 @@ try {
       sourceId: `window:${handle}:0`,
       sourceName: title,
       quality: "custom",
-      customWidth: 640,
-      customHeight: 360,
-      customFPS: 24,
+      customWidth: profileSwitch ? 1280 : 640,
+      customHeight: profileSwitch ? 720 : 360,
+      customFPS: profileSwitch ? 60 : 24,
       customCQ: 28,
       clipSeconds: 2,
       captureAudio: appAudio,
       microphone: false,
    });
    await delay(4000);
+   if (profileSwitch) {
+      for (const name of ["queued-a", "queued-b", "queued-c"])
+         await command({ action: "save", requestId: name, requestedAt: Date.now(), path: path.join(folder, `${name}.mkv`) });
+      const saturated = await command({ action: "save", requestId: "saturated", requestedAt: Date.now(), path: path.join(folder, "saturated.mkv") }, "error");
+      assert(saturated.message?.includes("Three clips"), saturated.message ?? "The queue should reject another request");
+      await command({ action: "stop" });
+      const restarted = await command(
+         {
+            action: "start",
+            sourceKind: "app",
+            sourceId: `window:${handle}:0`,
+            sourceName: title,
+            quality: "custom",
+            customWidth: 640,
+            customHeight: 360,
+            customFPS: 24,
+            customCQ: 28,
+            clipSeconds: 2,
+            captureAudio: appAudio,
+            microphone: false,
+         },
+         "error"
+      );
+      assert(restarted.message?.includes("Wait for clip saves"), restarted.message ?? "Restart must preserve queued originals");
+      assert(!events.some((event) => event.event === "saved"), "Writer gate must hold queued jobs until released");
+      await writeFile(writerGate, "release");
+      for (const name of ["queued-a", "queued-b", "queued-c"]) await verify(name, 1.5, true, 1280, 720, 60);
+      await command({
+         action: "start",
+         sourceKind: "app",
+         sourceId: `window:${handle}:0`,
+         sourceName: title,
+         quality: "custom",
+         customWidth: 640,
+         customHeight: 360,
+         customFPS: 24,
+         customCQ: 28,
+         clipSeconds: 2,
+         captureAudio: appAudio,
+         microphone: false,
+      });
+      await delay(3000);
+   }
    await verify("healthy", 1.5);
+   await command({ action: "save", requestId: "failed-destination", requestedAt: Date.now(), path: path.join(folder, "missing-parent", "failed.mkv") });
+   const failed = await wait((event) => event.event === "error" && event.requestId === "failed-destination");
+   assert(failed.message?.includes("storage"), failed.message ?? "Save failure must explain what to check");
+   const statusStart = events.length;
+   await command({ action: "status" });
+   const afterFailure = await wait((event) => event.event === "status", statusStart);
+   assert.equal(afterFailure.active, true, "A failed save must not stop recording");
+   assert.equal(afterFailure.pendingSaves, 0, "A failed save must release its queue slot");
+   assert(!events.some((event) => event.event === "saved" && event.requestId === "failed-destination"), "A failed save must not report success");
    await writeFile(actionPath, "minimize");
    await delay(5000);
    let after = events.length;

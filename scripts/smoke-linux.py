@@ -110,6 +110,16 @@ try:
         assert abs(measured["full"][track]-measured["half"][track]-6.02)<1, measured
         assert measured["muted"][track]<-70, measured
     assert any(event["event"]=="audio-levels" and event.get("capture",0)>0.05 for event in events)
+    import random
+    bitmap = folder/"noise.xbm"
+    bits = random.Random(997).randbytes(640*360//8)
+    rows = [",".join(f"0x{value:02x}" for value in bits[offset:offset+16]) for offset in range(0,len(bits),16)]
+    bitmap.write_text("#define test_width 640\n#define test_height 360\nstatic unsigned char test_bits[] = {\n"+",\n".join(rows)+"};\n")
+    subprocess.run(["xsetroot","-bitmap",str(bitmap),"-fg","white","-bg","black"],env=env,check=True)
+    time.sleep(3)
+    command(dict(action="save",path=str(folder/"missing-parent"/"failed.mkv"),requestId="failed-destination",requestedAt=int(time.time()*1000)))
+    wait(lambda event: event["event"]=="error" and event.get("requestId")=="failed-destination")
+    assert helper.poll() is None, "A failed save destination must not kill capture"
     # Accepted save requests must survive immediate Stop on the software path.
     command(dict(action="save",path=str(folder/"queued.mkv"),requestId="queued",requestedAt=int(time.time()*1000)))
     command(dict(action="stop"))

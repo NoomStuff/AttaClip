@@ -85,6 +85,9 @@ await writeFile(
    path.join(directory, "verification/codecs.json"),
    `${JSON.stringify(
       {
+         controlledSha256: createHash("sha256")
+            .update(await readFile(controlled))
+            .digest("hex"),
          referenceSha256: createHash("sha256")
             .update(await readFile(reference))
             .digest("hex"),
