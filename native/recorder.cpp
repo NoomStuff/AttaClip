@@ -5,22 +5,154 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <json.hpp>
+#include <memory>
 #include <mutex>
 #include <obs.h>
 #include <thread>
 #include <util/pipe.h>
 #include <util/platform.h>
 #include <vector>
+#ifdef __APPLE__
+#include "macos/platform.hpp"
+#endif
 #ifdef __linux__
+#include "x11-compat.hpp"
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
 #include <pthread.h>
 #include <signal.h>
+#include <xcb/xcb.h>
+#endif
+// Separate XCB connections avoid process-wide Xlib error handler changes when a
+// captured window disappears. Reply errors simply make that target unavailable.
+#ifdef __linux__
+xcb_connection_t *candidateConnection = nullptr;
+std::mutex xcbMutex;
+xcb_atom_t atom(const char *name) {
+  auto *reply = xcb_intern_atom_reply(
+      candidateConnection,
+      xcb_intern_atom(candidateConnection, 0, uint16_t(strlen(name)), name),
+      nullptr);
+  xcb_atom_t value = reply ? reply->atom : XCB_ATOM_NONE;
+  free(reply);
+  return value;
+}
+std::vector<uint8_t> property(xcb_window_t window, const char *name) {
+  auto *reply = xcb_get_property_reply(
+      candidateConnection,
+      xcb_get_property(candidateConnection, 0, window, atom(name),
+                       XCB_GET_PROPERTY_TYPE_ANY, 0, 4096),
+      nullptr);
+  std::vector<uint8_t> result;
+  if (reply) {
+    auto *data = static_cast<uint8_t *>(xcb_get_property_value(reply));
+    result.assign(data, data + xcb_get_property_value_length(reply));
+  }
+  free(reply);
+  return result;
+}
+uint32_t cardinal(xcb_window_t window, const char *name) {
+  auto bytes = property(window, name);
+  uint32_t value = 0;
+  if (bytes.size() >= 4)
+    memcpy(&value, bytes.data(), 4);
+  return value;
+}
+std::string windowText(xcb_window_t window, const char *name) {
+  auto bytes = property(window, name);
+  if (bytes.empty())
+    return {};
+  auto end = std::find(bytes.begin(), bytes.end(), uint8_t(0));
+  return std::string(bytes.begin(), end);
+}
+bool x11Available(uintptr_t window, uint32_t pid) {
+  if (!window)
+    return true;
+  std::lock_guard<std::mutex> lock(xcbMutex);
+  if (!candidateConnection)
+    return false;
+  auto *reply = xcb_get_window_attributes_reply(
+      candidateConnection,
+      xcb_get_window_attributes(candidateConnection, uint32_t(window)),
+      nullptr);
+  bool available = reply && reply->map_state == XCB_MAP_STATE_VIEWABLE &&
+                   (!pid || cardinal(uint32_t(window), "_NET_WM_PID") == pid);
+  free(reply);
+  return available;
+}
+nlohmann::json captureCandidates() {
+  std::lock_guard<std::mutex> lock(xcbMutex);
+  nlohmann::json result = nlohmann::json::array();
+  if (!candidateConnection)
+    return result;
+  auto roots = xcb_setup_roots_iterator(xcb_get_setup(candidateConnection));
+  for (; roots.rem; xcb_screen_next(&roots)) {
+    auto *screen = roots.data;
+    auto bytes = property(screen->root, "_NET_CLIENT_LIST");
+    std::vector<xcb_window_t> windows(bytes.size() / 4);
+    if (!windows.empty())
+      memcpy(windows.data(), bytes.data(), windows.size() * 4);
+    if (windows.empty()) {
+      auto *tree = xcb_query_tree_reply(
+          candidateConnection,
+          xcb_query_tree(candidateConnection, screen->root), nullptr);
+      if (tree)
+        windows.assign(xcb_query_tree_children(tree),
+                       xcb_query_tree_children(tree) +
+                           xcb_query_tree_children_length(tree));
+      free(tree);
+    }
+    auto foreground = cardinal(screen->root, "_NET_ACTIVE_WINDOW");
+    for (auto window : windows) {
+      auto *attrs = xcb_get_window_attributes_reply(
+          candidateConnection,
+          xcb_get_window_attributes(candidateConnection, window), nullptr);
+      bool visible = attrs && attrs->map_state == XCB_MAP_STATE_VIEWABLE &&
+                     !attrs->override_redirect;
+      free(attrs);
+      if (!visible)
+        continue;
+      auto name = windowText(window, "_NET_WM_NAME");
+      if (name.empty())
+        name = windowText(window, "WM_NAME");
+      auto pid = cardinal(window, "_NET_WM_PID");
+      if (!pid || name.empty())
+        continue;
+      std::error_code error;
+      auto executable = std::filesystem::read_symlink(
+          "/proc/" + std::to_string(pid) + "/exe", error);
+      if (error)
+        continue;
+      auto *geometry = xcb_get_geometry_reply(
+          candidateConnection, xcb_get_geometry(candidateConnection, window),
+          nullptr);
+      auto *position = xcb_translate_coordinates_reply(
+          candidateConnection,
+          xcb_translate_coordinates(candidateConnection, window, screen->root,
+                                    0, 0),
+          nullptr);
+      bool fullscreen = geometry && position && position->dst_x <= 0 &&
+                        position->dst_y <= 0 &&
+                        geometry->width >= screen->width_in_pixels &&
+                        geometry->height >= screen->height_in_pixels;
+      free(geometry);
+      free(position);
+      result.push_back({{"id", "window:" + std::to_string(window) + ":0"},
+                        {"name", name},
+                        {"executable", executable.string()},
+                        {"pid", pid},
+                        {"foreground", foreground == window},
+                        {"fullscreen", fullscreen}});
+    }
+  }
+  return result;
+}
 #endif
 #ifdef _WIN32
 #include <objbase.h>
@@ -30,11 +162,103 @@
 #include <windows.h>
 #endif
 using json = nlohmann::json;
+#ifdef _WIN32
+std::string utf8(const std::wstring &value) {
+  if (value.empty())
+    return {};
+  int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()),
+                                 nullptr, 0, nullptr, nullptr);
+  std::string result(size, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()),
+                      result.data(), size, nullptr, nullptr);
+  return result;
+}
+json captureCandidates() {
+  json windows = json::array();
+  EnumWindows(
+      [](HWND window, LPARAM data) -> BOOL {
+        if (!IsWindowVisible(window) || window == GetShellWindow() ||
+            window == GetDesktopWindow() || GetWindow(window, GW_OWNER))
+          return TRUE;
+        int length = GetWindowTextLengthW(window);
+        if (!length)
+          return TRUE;
+        std::wstring title(size_t(length) + 1, L'\0');
+        title.resize(GetWindowTextW(window, title.data(), int(title.size())));
+        DWORD pid = 0;
+        GetWindowThreadProcessId(window, &pid);
+        HANDLE process =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process)
+          return TRUE;
+        std::wstring executable(32768, L'\0');
+        DWORD size = DWORD(executable.size());
+        bool identified =
+            QueryFullProcessImageNameW(process, 0, executable.data(), &size);
+        CloseHandle(process);
+        if (!identified)
+          return TRUE;
+        executable.resize(size);
+        RECT rect{};
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        bool fullscreen =
+            !IsIconic(window) && GetWindowRect(window, &rect) &&
+            GetMonitorInfo(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                           &monitor) &&
+            rect.left <= monitor.rcMonitor.left &&
+            rect.top <= monitor.rcMonitor.top &&
+            rect.right >= monitor.rcMonitor.right &&
+            rect.bottom >= monitor.rcMonitor.bottom;
+        auto &result = *reinterpret_cast<json *>(data);
+        result.push_back(
+            {{"id",
+              "window:" + std::to_string(reinterpret_cast<uintptr_t>(window)) +
+                  ":0"},
+             {"name", utf8(title)},
+             {"executable", utf8(executable)},
+             {"pid", pid},
+             {"foreground", window == GetForegroundWindow()},
+             {"fullscreen", fullscreen}});
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&windows));
+  return windows;
+}
+#endif
 std::mutex stdoutMutex;
+std::atomic<bool> captureTextureFailure{false};
 std::string muxExecutable = "obs-ffmpeg-mux.exe";
+obs_source_t *createCaptureSource(const char *id, obs_data_t *settings) {
+  const char *registered = nullptr;
+  bool found = false;
+  for (size_t i = 0; obs_enum_input_types(i, &registered); i++)
+    if (std::string(registered) == id)
+      found = true;
+  if (!found)
+    throw std::runtime_error("The selected capture method is unavailable. Its "
+                             "OBS module did not initialize on this session");
+  return obs_source_create_private(id, "Capture", settings);
+}
+std::vector<std::string> hardwareEncoders() {
+  std::vector<std::string> result;
+  // These are hardware encoders, including the upload path on a secondary
+  // GPU. OBS modules register them only after their device availability probe.
+  for (const char *preferred :
+       {"obs_nvenc_h264_tex", "obs_nvenc_h264", "h264_texture_amf",
+        "h264_fallback_amf", "obs_qsv11_v2", "obs_qsv11_soft_v2"}) {
+    const char *id = nullptr;
+    for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
+      if (std::string(id) == preferred)
+        result.emplace_back(preferred);
+  }
+  return result;
+}
 const char *graphicsModule() {
 #ifdef _WIN32
   return "libobs-d3d11.dll";
+#elif defined(__APPLE__)
+  return attaclip::macos::graphicsModule();
 #else
   return "libobs-opengl.so";
 #endif
@@ -42,6 +266,8 @@ const char *graphicsModule() {
 const char *microphoneType() {
 #ifdef _WIN32
   return "wasapi_input_capture";
+#elif defined(__APPLE__)
+  return "coreaudio_input_capture";
 #else
   return "pulse_input_capture";
 #endif
@@ -73,6 +299,8 @@ void emit(json value) {
   std::cout << value.dump() << std::endl;
 }
 void logger(int level, const char *format, va_list args, void *) {
+  if (strstr(format, "Cannot create EGLImage"))
+    captureTextureFailure = true;
   if (level <= LOG_INFO) {
     vfprintf(stderr, format, args);
     fputs("\n", stderr);
@@ -100,6 +328,8 @@ struct Request {
 };
 struct Job {
   Request request;
+  int64_t end = 0;
+  bool reduceOverlap = false;
   int width = 0, height = 0, fps = 0;
   double secondsSinceCapture = 0;
   std::string source;
@@ -133,6 +363,12 @@ public:
   std::atomic<bool> active{false};
   std::atomic<int> pending{0};
   std::atomic<uintptr_t> targetWindow{0};
+  std::atomic<uint32_t> targetProcess{0};
+  std::atomic<bool> captureEnabled{false};
+  std::atomic<bool> gameCapture{false}, gameReady{false};
+  std::atomic<bool> windowCompatibility{false};
+  uint64_t gameStarted = 0;
+  json gameConfig;
   obs_volmeter_t *captureMeter = nullptr, *microphoneMeter = nullptr;
   struct MeterContext {
     Recorder *owner;
@@ -147,7 +383,7 @@ public:
   int seconds = 60, width = 1920, height = 1080, fps = 60;
   int64_t previousEnd = 0;
   bool avoidOverlap = false;
-  std::string encoder, sourceName;
+  std::string encoder, sourceName, selectedSourceId;
   Recorder() {
     captureMeter = obs_volmeter_create(OBS_FADER_LOG);
     microphoneMeter = obs_volmeter_create(OBS_FADER_LOG);
@@ -186,6 +422,10 @@ public:
     obs_volmeter_destroy(microphoneMeter);
   }
   void release() {
+    captureEnabled = false;
+    gameCapture = false;
+    gameReady = false;
+    windowCompatibility = false;
     obs_volmeter_detach_source(captureMeter);
     obs_volmeter_detach_source(microphoneMeter);
     captureLevel = 0;
@@ -252,13 +492,54 @@ public:
     idleVideo();
   }
   bool targetAvailable() {
+    if (!captureEnabled)
+      return false;
+    if (gameCapture && !gameReady)
+      return false;
 #ifdef _WIN32
     HWND window = reinterpret_cast<HWND>(targetWindow.load());
     if (window &&
         (!IsWindow(window) || IsIconic(window) || !IsWindowVisible(window)))
       return false;
+    if (window) {
+      DWORD pid = 0;
+      GetWindowThreadProcessId(window, &pid);
+      if (pid != targetProcess.load())
+        return false;
+    }
+#endif
+#ifdef __APPLE__
+    return attaclip::macos::targetAvailable(targetWindow.load());
+#endif
+#ifdef __linux__
+    if (!screenCapture && !windowCompatibility && captureTextureFailure)
+      return false;
+    if (windowCompatibility && !x11CompatibilityAvailable(targetWindow.load()))
+      return false;
+    return x11Available(targetWindow.load(), targetProcess.load());
 #endif
     return true;
+  }
+  void refreshCapture() {
+#ifdef _WIN32
+    if (!gameCapture || !capture)
+      return;
+    calldata_t data{};
+    calldata_init(&data);
+    bool called = proc_handler_call(obs_source_get_proc_handler(capture),
+                                    "get_hooked", &data);
+    gameReady = called && calldata_bool(&data, "hooked");
+    calldata_free(&data);
+    if (!gameReady && os_gettime_ns() - gameStarted > 3000000000ULL) {
+      json fallback = gameConfig;
+      fallback["captureMethod"] = "window";
+      source(fallback);
+      emit({{"event", "capture-method"},
+            {"method", "window"},
+            {"reason", "Game capture could not hook this application. "
+                       "Capturing the same application window"}});
+    }
+#endif
   }
   void setAudio(const json &c) {
     std::string source = c.at("source");
@@ -270,7 +551,12 @@ public:
     if (source == "capture") {
       captureVolume = volume;
       captureMuted = muted;
-      obs_source_t *source = screenCapture ? desktop : capture;
+      obs_source_t *source =
+#ifdef __APPLE__
+          capture;
+#else
+          screenCapture ? desktop : capture;
+#endif
       if (source) {
         obs_source_set_volume(source, volume);
         obs_source_set_muted(source, muted || !captureAudioEnabled);
@@ -315,8 +601,10 @@ public:
     std::lock_guard<std::mutex> lock(mutex);
     if (captureInterrupted) {
       // Keep earlier footage available until recovery produces a decodable
-      // keyframe. Never join the absent interval into a seemingly continuous clip.
-      if (p->type != OBS_ENCODER_VIDEO || !p->keyframe) return;
+      // keyframe. Never join the absent interval into a seemingly continuous
+      // clip.
+      if (p->type != OBS_ENCODER_VIDEO || !p->keyframe)
+        return;
       ring.clear();
       bytes = 0;
       captureInterrupted = false;
@@ -361,8 +649,6 @@ public:
         break;
       }
     int64_t begin = end - int64_t(seconds) * 1000000;
-    if (avoidOverlap)
-      begin = std::max(begin, previousEnd);
     size_t start = ring.size();
     // Stream-copy boundaries must start on a keyframe. Keep at most one
     // preceding GOP.
@@ -378,6 +664,8 @@ public:
         }
     Job j;
     j.request = r;
+    j.end = end;
+    j.reduceOverlap = avoidOverlap;
     j.width = width;
     j.height = height;
     j.fps = fps;
@@ -467,6 +755,23 @@ public:
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       bool okay = false;
+      size_t start = 0;
+      int64_t cutoff = 0;
+      if (j.reduceOverlap) {
+        std::lock_guard<std::mutex> lock(mutex);
+        cutoff = previousEnd;
+        // The writer is serial. Only a successfully published predecessor can
+        // shorten this job, including jobs snapshotted before it finished.
+        for (size_t i = 0; i < j.packets.size(); i++)
+          if (j.packets[i].p.type == OBS_ENCODER_VIDEO &&
+              j.packets[i].p.keyframe && j.packets[i].p.sys_dts_usec <= cutoff)
+            start = i;
+      }
+      const double overlapSeconds =
+          cutoff > 0 ? std::max(0., double(std::min(cutoff, j.end) -
+                                           j.packets[start].p.sys_dts_usec) /
+                                        1000000.)
+                     : 0.;
       std::string temp = j.request.path + ".saving.mkv";
       auto *args = os_process_args_create(muxExecutable.c_str());
       auto add = [&](std::string v) {
@@ -511,12 +816,14 @@ public:
           if (!writePacket(pipe, p, 0))
             okay = false;
         }
-        int64_t origin = j.packets.front().p.dts_usec;
-        for (auto &p : j.packets)
+        int64_t origin = j.packets[start].p.dts_usec;
+        for (size_t i = start; i < j.packets.size(); i++) {
+          auto &p = j.packets[i];
           if (!writePacket(pipe, p.p, origin)) {
             okay = false;
             break;
           }
+        }
         int code = os_process_pipe_destroy(pipe);
         okay = okay && code == 0;
       }
@@ -535,13 +842,14 @@ public:
           std::filesystem::remove(temp);
 #endif
           std::lock_guard<std::mutex> lock(mutex);
-          previousEnd = j.request.end;
+          previousEnd = std::max(previousEnd, j.end);
           emit({{"event", "saved"},
                 {"requestId", j.request.id},
                 {"path", j.request.path},
                 {"previousFootage", j.secondsSinceCapture > 0.25},
                 {"secondsSinceCapture", j.secondsSinceCapture},
-                {"source", j.source}});
+                {"source", j.source},
+                {"overlapSeconds", overlapSeconds}});
         } else {
           emit({{"event", "error"},
                 {"requestId", j.request.id},
@@ -558,8 +866,35 @@ public:
   }
   void source(const json &c) {
     std::string kind = c.value("sourceKind", "screen");
-    auto *s = obs_data_create();
+    if (kind == "auto")
+      kind = c.value("resolvedKind", "waiting");
+    if (kind == "waiting") {
+      captureEnabled = false;
+      gameCapture = false;
+      gameReady = false;
+      targetWindow = 0;
+      targetProcess = 0;
+      obs_volmeter_detach_source(captureMeter);
+      captureLevel = 0;
+      if (item)
+        obs_sceneitem_remove(item);
+      item = nullptr;
+      if (capture)
+        obs_source_release(capture);
+      capture = nullptr;
+      if (desktop)
+        obs_source_set_muted(desktop, true);
+      screenCapture = false;
+      std::lock_guard<std::mutex> lock(mutex);
+      sourceName = c.value("sourceName", "Waiting for game");
+      selectedSourceId.clear();
+      return;
+    }
+    std::unique_ptr<obs_data_t, decltype(&obs_data_release)> sourceSettings(
+        obs_data_create(), &obs_data_release);
+    auto *s = sourceSettings.get();
     obs_source_t *next = nullptr;
+    bool compatibility = false;
 #ifdef _WIN32
     if (kind == "screen") {
       auto *props = obs_get_source_properties("monitor_capture");
@@ -616,7 +951,7 @@ public:
       obs_data_set_string(s, "monitor_id", monitor.c_str());
       obs_data_set_bool(s, "capture_cursor", true);
       obs_data_set_bool(s, "force_sdr", true);
-      next = obs_source_create_private("monitor_capture", "Capture", s);
+      next = createCaptureSource("monitor_capture", s);
     } else if (kind == "app") {
       std::string window = c.value("window", "");
       std::string sourceId = c.value("sourceId", "");
@@ -624,6 +959,11 @@ public:
         HWND hwnd = reinterpret_cast<HWND>(std::stoull(sourceId.substr(7)));
         if (!IsWindow(hwnd) || IsIconic(hwnd) || !IsWindowVisible(hwnd))
           throw std::runtime_error("The selected application is unavailable");
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (c.contains("pid") && c.at("pid").get<uint32_t>() != pid)
+          throw std::runtime_error(
+              "The selected application changed. Select it again");
         dstr title{}, klass{}, exe{};
         ms_get_window_title(&title, hwnd);
         ms_get_window_class(&klass, hwnd);
@@ -632,6 +972,15 @@ public:
           dstr_free(&klass);
           throw std::runtime_error(
               "The selected application cannot be identified safely");
+        }
+        if (ms_find_window(INCLUDE_MINIMIZED, WINDOW_PRIORITY_TITLE,
+                           klass.array, title.array, exe.array) != hwnd) {
+          dstr_free(&title);
+          dstr_free(&klass);
+          dstr_free(&exe);
+          throw std::runtime_error(
+              "Another application has the same window title. Rename the "
+              "selected window or choose another source");
         }
         for (auto *value : {&title, &klass, &exe}) {
           dstr_replace(value, "#", "#22");
@@ -663,48 +1012,129 @@ public:
       obs_data_set_bool(s, "cursor", true);
       obs_data_set_bool(s, "capture_audio", c.value("captureAudio", true));
       obs_data_set_bool(s, "force_sdr", true);
-      next = obs_source_create_private("window_capture", "Capture", s);
+      bool preferGame =
+          c.value("captureMethod",
+                  c.value("sourceKind", "") == "auto" ? "game" : "window") ==
+          "game";
+      if (preferGame) {
+        obs_data_set_string(s, "capture_mode", "window");
+        obs_data_set_bool(s, "capture_cursor", true);
+        obs_data_set_bool(s, "anti_cheat_hook", true);
+        next = createCaptureSource("game_capture", s);
+      } else
+        next = createCaptureSource("window_capture", s);
     } else
       throw std::runtime_error(
           "Automatic game detection is not available in this recording backend "
           "yet. Choose Screen or App");
+#elif defined(__APPLE__)
+    next = attaclip::macos::createCapture(c);
 #elif defined(__linux__)
-    if (kind != "screen")
-      throw std::runtime_error("Linux application capture is not available yet. Screen capture records the selected desktop and its audio");
-    if (!std::getenv("DISPLAY") || (std::getenv("WAYLAND_DISPLAY") && *std::getenv("WAYLAND_DISPLAY")) || (std::getenv("XDG_SESSION_TYPE") && std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland"))
-      throw std::runtime_error("Native Linux capture currently requires an X11 session. Wayland capture is unavailable");
-    int screen = c.value("screenIndex", 0);
-    obs_data_set_int(s, "screen", screen);
-    obs_data_set_bool(s, "show_cursor", true);
-    next = obs_source_create_private("xshm_input_v2", "Capture", s);
-    if (!next)
-      throw std::runtime_error("The X11 capture module could not create a source");
-    auto *props = obs_source_properties(next);
-    auto *screens = props ? obs_properties_get(props, "screen") : nullptr;
-    bool found = false;
-    if (screens) for (size_t i = 0; i < obs_property_list_item_count(screens); i++) {
-      if (obs_property_list_item_disabled(screens, i)) continue;
-      int candidate = int(obs_property_list_item_int(screens, i));
-      if (c.contains("bounds") && c["bounds"].is_object()) {
-        std::string label = obs_property_list_item_name(screens, i);
-        auto bracket = label.find('(');
-        int w = 0, h = 0, x = 0, y = 0;
-        if (bracket == std::string::npos || sscanf(label.c_str() + bracket, "(%dx%d @ %d,%d)", &w, &h, &x, &y) != 4) continue;
-        auto b = c["bounds"];
-        if (w != b.value("width", 0) || h != b.value("height", 0) || x != b.value("x", 0) || y != b.value("y", 0)) continue;
-      } else if (candidate != screen) continue;
-      obs_data_set_int(s, "screen", candidate);
-      found = true;
-      break;
-    }
-    obs_properties_destroy(props);
-    if (!found) { obs_source_release(next); obs_data_release(s); throw std::runtime_error("The selected X11 display could not be matched safely"); }
-    obs_source_update(next, s);
+    if (!std::getenv("DISPLAY") ||
+        (std::getenv("WAYLAND_DISPLAY") && *std::getenv("WAYLAND_DISPLAY")) ||
+        (std::getenv("XDG_SESSION_TYPE") &&
+         std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland"))
+      throw std::runtime_error("Native Linux capture currently requires an X11 "
+                               "session. Wayland capture is unavailable");
+    if (kind == "app") {
+      if (c.value("captureAudio", true))
+        throw std::runtime_error(
+            "Application audio capture is unavailable on Linux. Turn off "
+            "Capture audio to record this application's video. Desktop audio "
+            "will not be substituted");
+      std::string id = c.value("sourceId", "");
+      if (id.rfind("window:", 0) != 0)
+        throw std::runtime_error(
+            "The selected X11 window has no capture identity");
+      uint32_t window = uint32_t(std::stoull(id.substr(7)));
+      if (!x11Available(window, c.value("pid", uint32_t(0))))
+        throw std::runtime_error(
+            "The selected X11 application is unavailable or changed");
+      std::string name, klass;
+      {
+        std::lock_guard<std::mutex> lock(xcbMutex);
+        name = windowText(window, "_NET_WM_NAME");
+        if (name.empty())
+          name = windowText(window, "WM_NAME");
+        klass = windowText(window, "WM_CLASS");
+      }
+      std::string identity =
+          std::to_string(window) + "\r\n" + name + "\r\n" + klass;
+      obs_data_set_string(s, "capture_window", identity.c_str());
+      obs_data_set_bool(s, "show_cursor", true);
+      captureTextureFailure = false;
+      next = createCaptureSource("xcomposite_input", s);
+      if (captureTextureFailure) {
+        obs_source_release(next);
+        obs_wait_for_destroy_queue();
+        obs_data_set_int(s, "window", window);
+        obs_data_set_int(s, "fps", fps);
+        next = createCaptureSource("attaclip_x11_window", s);
+        auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while ((!obs_source_get_width(next) || !obs_source_get_height(next)) &&
+               std::chrono::steady_clock::now() < deadline)
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!obs_source_get_width(next) || !obs_source_get_height(next)) {
+          obs_source_release(next);
+          throw std::runtime_error(
+              "This X11 session could not capture the application's pixels. No "
+              "desktop capture was substituted");
+        }
+        compatibility = true;
+        emit({{"event", "capture-method"},
+              {"method", "compatibility"},
+              {"reason",
+               "Application capture uses CPU compatibility mode because this "
+               "graphics driver cannot import its window texture"}});
+      }
+    } else if (kind == "screen") {
+      int screen = c.value("screenIndex", 0);
+      obs_data_set_int(s, "screen", screen);
+      obs_data_set_bool(s, "show_cursor", true);
+      next = createCaptureSource("xshm_input_v2", s);
+      if (!next)
+        throw std::runtime_error(
+            "The X11 capture module could not create a source");
+      auto *props = obs_source_properties(next);
+      auto *screens = props ? obs_properties_get(props, "screen") : nullptr;
+      bool found = false;
+      if (screens)
+        for (size_t i = 0; i < obs_property_list_item_count(screens); i++) {
+          if (obs_property_list_item_disabled(screens, i))
+            continue;
+          int candidate = int(obs_property_list_item_int(screens, i));
+          if (c.contains("bounds") && c["bounds"].is_object()) {
+            std::string label = obs_property_list_item_name(screens, i);
+            auto bracket = label.find('(');
+            int w = 0, h = 0, x = 0, y = 0;
+            if (bracket == std::string::npos ||
+                sscanf(label.c_str() + bracket, "(%dx%d @ %d,%d)", &w, &h, &x,
+                       &y) != 4)
+              continue;
+            auto b = c["bounds"];
+            if (w != b.value("width", 0) || h != b.value("height", 0) ||
+                x != b.value("x", 0) || y != b.value("y", 0))
+              continue;
+          } else if (candidate != screen)
+            continue;
+          obs_data_set_int(s, "screen", candidate);
+          found = true;
+          break;
+        }
+      obs_properties_destroy(props);
+      if (!found) {
+        obs_source_release(next);
+        throw std::runtime_error(
+            "The selected X11 display could not be matched safely");
+      }
+      obs_source_update(next, s);
+    } else
+      throw std::runtime_error("The resolved X11 capture source is invalid");
 #else
     throw std::runtime_error(
         "Native capture on this platform is not yet implemented");
 #endif
-    obs_data_release(s);
     if (!next)
       throw std::runtime_error("The capture source could not be created");
     uintptr_t target = 0;
@@ -714,6 +1144,30 @@ public:
         target = std::stoull(id.substr(7));
     }
     targetWindow = target;
+    uint32_t targetPid = 0;
+#ifdef _WIN32
+    if (target) {
+      DWORD pid = 0;
+      GetWindowThreadProcessId(reinterpret_cast<HWND>(target), &pid);
+      targetPid = pid;
+    }
+#endif
+#ifdef __linux__
+    if (target) {
+      std::lock_guard<std::mutex> lock(xcbMutex);
+      targetPid = cardinal(uint32_t(target), "_NET_WM_PID");
+    }
+#endif
+    targetProcess = targetPid;
+    windowCompatibility = compatibility;
+#ifdef _WIN32
+    gameCapture = std::string(obs_source_get_id(next)) == "game_capture";
+#else
+    gameCapture = false;
+#endif
+    gameReady = false;
+    gameStarted = os_gettime_ns();
+    gameConfig = c;
     screenCapture = kind == "screen";
     captureAudioEnabled = c.value("captureAudio", true);
     obs_source_set_audio_mixers(next, 3);
@@ -733,12 +1187,19 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex);
       sourceName = c.value("sourceName", "Screen");
+      selectedSourceId = c.value("sourceId", "");
     }
+    captureEnabled = true;
     if (desktop)
       obs_source_set_muted(desktop, kind != "screen" ||
                                         !c.value("captureAudio", true) ||
                                         captureMuted);
-    obs_source_t *audioSource = screenCapture ? desktop : capture;
+    obs_source_t *audioSource =
+#ifdef __APPLE__
+        capture;
+#else
+        screenCapture ? desktop : capture;
+#endif
     if (audioSource) {
       obs_source_set_volume(audioSource, captureVolume);
       obs_source_set_muted(audioSource, captureMuted || !captureAudioEnabled);
@@ -751,12 +1212,9 @@ public:
     if (pending > 0)
       throw std::runtime_error(
           "Wait for clip saves to finish before restarting");
-    if (c.value("avoidOverlap", false))
-      throw std::runtime_error("Avoiding overlap is not available in this "
-                               "recording backend yet. Turn it off to record");
     release();
     seconds = c.value("clipSeconds", 60);
-    avoidOverlap = false;
+    avoidOverlap = c.value("avoidOverlap", false);
     previousEnd = 0;
     std::string quality = c.value("quality", "standard");
     width = quality == "low" ? 1280 : quality == "high" ? 2560 : 1920;
@@ -791,15 +1249,21 @@ public:
     scene = obs_scene_create_private("Recording");
     obs_set_output_source(0, obs_scene_get_source(scene));
     auto *d = obs_data_create();
+#ifndef __APPLE__
     obs_data_set_string(d, "device_id", "default");
-    desktop =
-        obs_source_create_private(desktopType(), "Capture audio", d);
+    desktop = obs_source_create_private(desktopType(), "Capture audio", d);
     obs_data_release(d);
     if (desktop) {
       obs_source_set_audio_mixers(desktop, 3);
       obs_set_output_source(1, desktop);
     }
+#else
+    obs_data_release(d);
+#endif
     if (c.value("microphone", false)) {
+#ifdef __APPLE__
+      attaclip::macos::requireMicrophonePermission();
+#endif
       d = obs_data_create();
       auto *props = obs_get_source_properties(microphoneType());
       auto *devices = obs_properties_get(props, "device_id");
@@ -847,11 +1311,24 @@ public:
     obs_data_set_int(d, "bf", 0);
     const char *id = nullptr;
     encoder.clear();
-    for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
-      if (std::string(id) == "obs_nvenc_h264_tex" ||
-          std::string(id) == "obs_nvenc_h264")
-        encoder = id;
-    if (std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE")) encoder.clear();
+#ifdef __APPLE__
+    encoder = attaclip::macos::hardwareEncoder(d, cq, width, height, fps);
+#else
+    auto hardware = hardwareEncoders();
+    if (!hardware.empty())
+      encoder = hardware.front();
+    if (encoder.find("amf") != std::string::npos)
+      obs_data_set_string(d, "preset", "balanced");
+    if (encoder.find("qsv") != std::string::npos) {
+      obs_data_set_string(d, "target_usage", "TU4");
+      obs_data_set_int(d, "qpi", cq);
+      obs_data_set_int(d, "qpp", cq);
+      obs_data_set_int(d, "qpb", cq);
+      obs_data_set_int(d, "bframes", 0);
+    }
+#endif
+    if (std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE"))
+      encoder.clear();
     if (encoder.empty() && c.value("allowSoftwareEncoder", false)) {
       for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
         if (std::string(id) == "obs_x264")
@@ -898,6 +1375,11 @@ public:
 Recorder *recorder = nullptr;
 int main(int argc, char **argv) {
   try {
+    std::filesystem::path root = argc > 1 ? argv[1] : ".";
+#ifdef __APPLE__
+    attaclip::macos::prepareProcess(root);
+    muxExecutable = attaclip::macos::muxPath();
+#endif
 #ifdef __linux__
     // Match OBS's frontend: a failed mux pipe is a save failure, never a
     // SIGPIPE termination of the capture process and its retained footage.
@@ -906,7 +1388,8 @@ int main(int argc, char **argv) {
     sigaddset(&brokenPipe, SIGPIPE);
     if (pthread_sigmask(SIG_BLOCK, &brokenPipe, nullptr) != 0)
       throw std::runtime_error("Could not configure recorder pipe handling");
-    if (!XInitThreads()) throw std::runtime_error("X11 thread initialization failed");
+    if (!XInitThreads())
+      throw std::runtime_error("X11 thread initialization failed");
 #endif
     base_set_log_handler(logger, nullptr);
 #ifdef _WIN32
@@ -927,13 +1410,18 @@ int main(int argc, char **argv) {
           "Could not disable capture compatibility updates");
     if (!obs_startup("en-US", config.u8string().c_str(), nullptr))
       throw std::runtime_error("libOBS initialization failed");
-    std::filesystem::path root = argc > 1 ? argv[1] : ".";
 #ifdef __linux__
-    if (!std::getenv("DISPLAY")) throw std::runtime_error("An X11 display is required for native recording");
+    if (!std::getenv("DISPLAY"))
+      throw std::runtime_error(
+          "An X11 display is required for native recording");
     auto *display = XOpenDisplay(nullptr);
-    if (!display) throw std::runtime_error("The X11 display could not be opened");
+    if (!display)
+      throw std::runtime_error("The X11 display could not be opened");
     obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
     obs_set_nix_platform_display(display);
+    candidateConnection = xcb_connect(nullptr, nullptr);
+    if (xcb_connection_has_error(candidateConnection))
+      throw std::runtime_error("X11 application identity connection failed");
     muxExecutable = (root / "obs-ffmpeg-mux").string();
 #endif
     obs_add_data_path(((root / "data/libobs").u8string() + "/").c_str());
@@ -952,8 +1440,8 @@ int main(int argc, char **argv) {
     if (obs_reset_video(&initial) != OBS_VIDEO_SUCCESS)
       throw std::runtime_error("Graphics initialization failed");
 #ifdef _WIN32
-    for (auto name :
-         {"win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc", "obs-x264"}) {
+    for (auto name : {"win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc",
+                      "obs-qsv11", "obs-x264"}) {
       obs_module_t *module = nullptr;
       auto dll = root / "obs-plugins/64bit" / (std::string(name) + ".dll");
       auto data = root / "data/obs-plugins" / name;
@@ -961,16 +1449,26 @@ int main(int argc, char **argv) {
                           data.u8string().c_str()) == MODULE_SUCCESS)
         obs_init_module(module);
     }
+#elif defined(__APPLE__)
+    attaclip::macos::loadModules();
 #elif defined(__linux__)
-    for (auto name : {"linux-capture", "linux-pulseaudio", "obs-ffmpeg", "obs-nvenc", "obs-x264"}) {
-      if (std::string(name) == "obs-nvenc" && std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE")) continue;
+    for (auto name : {"linux-capture", "linux-pulseaudio", "obs-ffmpeg",
+                      "obs-nvenc", "obs-x264"}) {
+      if (std::string(name) == "obs-nvenc" &&
+          std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE"))
+        continue;
       obs_module_t *module = nullptr;
       auto file = root / "obs-plugins" / (std::string(name) + ".so");
       auto data = root / "data/obs-plugins" / name;
-      if (obs_open_module(&module, file.string().c_str(), data.string().c_str()) == MODULE_SUCCESS) obs_init_module(module);
+      if (obs_open_module(&module, file.string().c_str(),
+                          data.string().c_str()) == MODULE_SUCCESS)
+        obs_init_module(module);
     }
 #endif
     obs_post_load_modules();
+#ifdef __linux__
+    registerX11CompatibilitySource();
+#endif
     obs_audio_info ai{};
     ai.samples_per_sec = 48000;
     ai.speakers = SPEAKERS_STEREO;
@@ -1003,7 +1501,9 @@ int main(int argc, char **argv) {
     {
       Recorder r;
       recorder = &r;
-      emit({{"event", "ready"}, {"version", obs_get_version_string()}});
+      emit({{"event", "ready"},
+            {"version", obs_get_version_string()},
+            {"encoders", hardwareEncoders()}});
       std::string line;
       while (std::getline(std::cin, line)) {
         json c;
@@ -1023,7 +1523,16 @@ int main(int argc, char **argv) {
             r.setAudio(c);
           else if (action == "exit")
             break;
-          else if (action == "windows") {
+          else if (action == "candidates") {
+#if defined(_WIN32) || defined(__linux__)
+            emit({{"event", "candidates"}, {"windows", captureCandidates()}});
+#elif defined(__APPLE__)
+            emit({{"event", "candidates"},
+                  {"windows", attaclip::macos::candidates()}});
+#else
+            emit({{"event", "candidates"}, {"windows", json::array()}});
+#endif
+          } else if (action == "windows") {
 #ifdef _WIN32
             auto *props = obs_get_source_properties("window_capture");
             auto *p = obs_properties_get(props, "window");
@@ -1046,6 +1555,7 @@ int main(int argc, char **argv) {
             obs_properties_destroy(props);
             emit({{"event", "audio-devices"}, {"devices", devices}});
           } else if (action == "status") {
+            r.refreshCapture();
             std::lock_guard<std::mutex> lock(r.mutex);
             double available = r.ring.empty()
                                    ? 0
@@ -1053,6 +1563,7 @@ int main(int argc, char **argv) {
                                       r.ring.front().p.sys_dts_usec) /
                                          1000000.;
             bool fullscreen = false;
+            std::string captureError;
 #ifdef _WIN32
             HWND foreground = GetForegroundWindow();
             RECT rect{};
@@ -1069,10 +1580,24 @@ int main(int argc, char **argv) {
                            foreground != GetDesktopWindow() &&
                            foreground != GetShellWindow();
 #endif
+#ifdef __APPLE__
+            fullscreen = attaclip::macos::foregroundFullscreen();
+            captureError = attaclip::macos::captureError();
+#endif
             emit({{"event", "status"},
                   {"fullscreen", fullscreen},
                   {"active", r.active.load()},
-                  {"waiting", r.active && (!r.targetAvailable() || r.captureInterrupted)},
+                  {"source", r.sourceName},
+                  {"message", captureError},
+                  {"sourceId", r.selectedSourceId},
+                  {"sourceKind", r.captureEnabled
+                                     ? (r.screenCapture ? "screen" : "app")
+                                     : "waiting"},
+                  {"captureMethod", r.windowCompatibility ? "compatibility"
+                                    : r.gameCapture       ? "game"
+                                                          : "window"},
+                  {"waiting",
+                   r.active && (!r.targetAvailable() || r.captureInterrupted)},
                   {"availableSeconds", std::min(double(r.seconds), available)},
                   {"pendingSaves", r.pending.load()}});
           }

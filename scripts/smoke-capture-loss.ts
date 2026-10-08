@@ -13,6 +13,7 @@ const title = `AttaClip capture fixture ${randomUUID()}`;
 const profileSwitch = Boolean(process.env["ATTACLIP_TEST_PROFILE_SWITCH"]);
 const writerGate = path.join(folder, "writer-ready");
 const appAudio = Boolean(process.env["ATTACLIP_TEST_APP_AUDIO"]);
+const autoCapture = Boolean(process.env["ATTACLIP_TEST_AUTO_CAPTURE"]);
 const tonePath = path.join(folder, "fixture-tone.wav");
 if (appAudio) {
    const tone = spawnSync(
@@ -162,7 +163,8 @@ try {
    await wait((event) => event.event === "ready");
    await command({
       action: "start",
-      sourceKind: "app",
+      sourceKind: autoCapture ? "auto" : "app",
+      resolvedKind: "app",
       sourceId: `window:${handle}:0`,
       sourceName: title,
       quality: "custom",
@@ -174,7 +176,16 @@ try {
       captureAudio: appAudio,
       microphone: false,
    });
-   await delay(4000);
+   if (autoCapture) {
+      for (let i = 0; i < 28; i++) {
+         await command({ action: "status" });
+         await delay(250);
+      }
+      assert(
+         events.some((event) => event.event === "capture-method"),
+         "GDI fixture must fall back to the same application window"
+      );
+   } else await delay(4000);
    if (profileSwitch) {
       for (const name of ["queued-a", "queued-b", "queued-c"])
          await command({ action: "save", requestId: name, requestedAt: Date.now(), path: path.join(folder, `${name}.mkv`) });

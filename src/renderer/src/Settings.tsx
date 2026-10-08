@@ -372,8 +372,8 @@ export function Settings({ state, run, ask }: { state: AppState; run: Run; ask: 
                         <Toggle
                            checked={draft.avoidOverlap}
                            onChange={(value) => change("avoidOverlap", value)}
-                           label="Avoid overlap with the previous clip"
-                           detail="Save only new footage since the last clip. Off by default."
+                           label="Reduce overlap between clips"
+                           detail="Starts near the previous saved moment. A small overlap may remain."
                         />
                         <div className="settings-note">
                            <SlidersHorizontal size={17} />

@@ -14,8 +14,8 @@ test("onboarding UI persists choices without starting recording or OS startup", 
       const page = await desktop.firstWindow();
       await expect(page.getByRole("heading", { name: "What would you like to capture?" })).toBeVisible();
       await page.getByRole("button", { name: "Auto", exact: true }).last().click();
-      await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
-      await expect(page.locator(".onboarding")).toContainText("isn't available");
+      await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeEnabled();
+      await expect(page.locator(".onboarding")).toContainText("Recording waits when no game is found");
       await page.getByRole("button", { name: "Screen", exact: true }).last().click();
       await page.getByRole("button", { name: "Continue", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Choose your sound" })).toBeVisible();

@@ -70,6 +70,9 @@ try:
     while not (private / "audio.sock").exists():
         assert time.monotonic() < deadline, "Private PulseAudio did not start"
         time.sleep(0.1)
+    if os.environ.get("ATTACLIP_TEST_X11_APP"):
+        launch(["openbox", "--sm-disable"], "window-manager")
+        time.sleep(1)
     launch(["xclock", "-update", "1", "-geometry", "200x200+10+10"], "clock")
     tone = folder / "tone.wav"
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000:duration=90", "-ac", "2", str(tone)], check=True)
@@ -134,6 +137,54 @@ try:
     wait(lambda event: event["event"]=="error" and event.get("requestId")=="collision")
     assert sentinel.read_bytes()==b"existing user file"
     command(dict(action="stop"))
+    if os.environ.get("ATTACLIP_TEST_X11_APP"):
+        title = "AttaClip isolated blue X11 app " + str(uuid.uuid4())
+        fixture = launch(["ffplay", "-v", "error", "-f", "lavfi", "-i", "color=blue:size=320x180:rate=30:duration=60", "-window_title", title, "-an"], "application")
+        candidate = None
+        for attempt in range(30):
+            previous = len(events)
+            command(dict(action="candidates"))
+            current = next(event for event in events[previous:] if event["event"] == "candidates")
+            candidate = next((value for value in current["windows"] if value["name"] == title), None)
+            if candidate: break
+            time.sleep(0.2)
+        assert candidate and candidate["pid"] == fixture.pid, "Candidate must identify the real ffplay PID"
+        assert pathlib.Path(candidate["executable"]).name == "ffplay"
+        config = dict(sourceKind="auto",resolvedKind="app",sourceId=candidate["id"],pid=candidate["pid"],sourceName=title,quality="custom",customWidth=640,customHeight=360,customFPS=24,customCQ=28,clipSeconds=2,microphone=False,allowSoftwareEncoder=True)
+        denied = command(dict(config,action="start",captureAudio=True), "error")
+        assert "Desktop audio will not be substituted" in denied["message"]
+        command(dict(action="stop"))
+        command(dict(config,action="start",captureAudio=False))
+        cover=launch(["ffplay","-v","error","-f","lavfi","-i","color=red:size=640x360:rate=30:duration=30","-window_title","Unrelated red window must not leak","-fs","-alwaysontop","-an"],"occluding-application")
+        time.sleep(1)
+        def cpu_ticks():
+            fields=pathlib.Path(f"/proc/{helper.pid}/stat").read_text().split()
+            return int(fields[13])+int(fields[14])
+        before_ticks=cpu_ticks(); before_time=time.monotonic()
+        time.sleep(4)
+        capture_cpu=(cpu_ticks()-before_ticks)/os.sysconf("SC_CLK_TCK")/(time.monotonic()-before_time)*100
+        file = folder/"application.mkv"
+        command(dict(action="save",path=str(file),requestId="application",requestedAt=int(time.time()*1000)))
+        wait(lambda event:event["event"]=="saved" and event.get("requestId")=="application")
+        subprocess.run(["ffmpeg","-v","error","-i",str(file),"-f","null","-"],check=True)
+        frame = subprocess.check_output(["ffmpeg","-v","error","-ss","0.4","-i",str(file),"-vf","crop=2:2:iw/2:ih/2","-frames:v","1","-pix_fmt","rgb24","-f","rawvideo","-"])
+        assert frame[2]>180 and frame[0]<40 and frame[1]<40, f"Selected application's blue pixels missing: {frame}"
+        assert volume(file,0)<-70 and volume(file,1)<-70, "Desktop tone must not leak into application capture"
+        fixture.terminate(); fixture.wait(timeout=5)
+        time.sleep(4)
+        previous=len(events)
+        command(dict(action="status"))
+        current=next(event for event in events[previous:] if event["event"]=="status")
+        assert current["waiting"] and current["availableSeconds"]>1.5
+        old=folder/"application-after-close.mkv"
+        command(dict(action="save",path=str(old),requestId="application-after-close",requestedAt=int(time.time()*1000)))
+        saved=wait(lambda event:event["event"]=="saved" and event.get("requestId")=="application-after-close")
+        assert saved["previousFootage"] and saved["secondsSinceCapture"]>3
+        subprocess.run(["ffmpeg","-v","error","-i",str(old),"-f","null","-"],check=True)
+        command(dict(action="stop"))
+        methods=[event for event in events if event["event"]=="capture-method"]
+        (folder/"application-measurement.json").write_text(json.dumps(dict(cpuOneCorePercent=capture_cpu,actualWindowPixels="320x180",encodedOutput="640x360@24",method=methods[-1].get("method") if methods else "window"),indent=2))
+        print("Exact PID application, blue pixels, audio privacy and closed-window history passed, CPU one-core percent",round(capture_cpu,2))
     helper.stdin.write('{"action":"exit"}\n')
     helper.stdin.flush()
     assert helper.wait(timeout=10)==0

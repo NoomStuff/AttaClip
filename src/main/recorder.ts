@@ -4,10 +4,12 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stoppedRecorder } from "../shared/defaults";
-import type { CaptureSource, Preferences, RecorderState } from "../shared/types";
+import type { CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState } from "../shared/types";
+import { GameCatalog, selectGame } from "./games";
 
 interface RecorderOptions {
    nativePath?: string;
+   gameCatalogPath?: string;
    onState: (state: RecorderState) => void;
    onSaved: (file: string, source: string, requestId: string, capture: { previousFootage: boolean; secondsSinceCapture: number }) => void | Promise<void>;
    onError: (message: string) => void;
@@ -32,6 +34,9 @@ interface NativeMessage {
    microphone?: number;
    previousFootage?: boolean;
    secondsSinceCapture?: number;
+   candidates?: GameCandidate[];
+   sourceId?: string;
+   sourceKind?: "screen" | "app" | "waiting";
 }
 
 export class Recorder {
@@ -49,10 +54,20 @@ export class Recorder {
    private windowsResolve: (() => void) | null = null;
    private devicesResolve: ((devices: Array<{ id: string; name: string }>) => void) | null = null;
    private commands = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
+   private readonly catalog: GameCatalog;
+   private candidatesPending: Promise<GameCandidate[]> | null = null;
+   private candidatesResolve: ((items: GameCandidate[]) => void) | null = null;
+   private autoPreferences: Preferences | null = null;
+   private autoSources: CaptureSource[] = [];
+   private autoKey = "";
+   private autoBusy = false;
+   private autoGeneration = 0;
+   private focused = new Map<string, number>();
    constructor(options: RecorderOptions) {
       this.options = options;
+      this.catalog = new GameCatalog(options.gameCatalogPath ?? path.join(process.cwd(), ".cache", "game-catalog.json"));
       this.current.supported =
-         (process.platform === "win32" || process.platform === "linux") &&
+         (process.platform === "win32" || process.platform === "linux" || process.platform === "darwin") &&
          (existsSync(this.executable) || (!options.nativePath && existsSync(this.developmentExecutable)));
       if (!this.current.supported) this.current.message = "The native recorder is not available in this build";
    }
@@ -68,6 +83,9 @@ export class Recorder {
    }
    get status(): RecorderState {
       return { ...this.current };
+   }
+   updatePreferences(preferences: Preferences): void {
+      if (this.autoPreferences && preferences.sourceKind === "auto") this.autoPreferences = preferences;
    }
    async foregroundFullscreen(): Promise<boolean> {
       if (this.process) this.send({ action: "status" });
@@ -87,6 +105,82 @@ export class Recorder {
          };
          this.send({ action: "audio-devices" });
       });
+   }
+   async games(additions: CustomGame[] = []): Promise<GameCandidate[]> {
+      if (!this.current.supported) return [];
+      await this.initialize();
+      await this.catalog.load();
+      void this.catalog.refresh();
+      const candidates = (await this.candidates()).filter((candidate) => candidate.pid !== process.pid);
+      const games = this.catalog.match(candidates, additions);
+      return candidates.map((candidate) => {
+         const gameName = games.find((game) => game.id === candidate.id)?.gameName;
+         return { ...candidate, ...(gameName ? { gameName } : {}) };
+      });
+   }
+   private candidates(): Promise<GameCandidate[]> {
+      if (this.candidatesPending) return this.candidatesPending;
+      this.candidatesPending = new Promise<GameCandidate[]>((resolve) => {
+         const timeout = setTimeout(() => {
+            this.candidatesResolve = null;
+            resolve([]);
+         }, 3000);
+         this.candidatesResolve = (items) => {
+            clearTimeout(timeout);
+            resolve(items);
+         };
+         this.send({ action: "candidates" });
+      }).finally(() => {
+         this.candidatesPending = null;
+      });
+      return this.candidatesPending;
+   }
+   private async autoConfiguration(preferences: Preferences, sources: CaptureSource[]): Promise<Record<string, unknown>> {
+      await this.catalog.load();
+      void this.catalog.refresh();
+      const candidates = (await this.candidates()).filter((candidate) => candidate.pid !== process.pid);
+      const games = this.catalog.match(candidates, preferences.customGames);
+      for (const game of games) if (game.foreground) this.focused.set(game.id, Date.now());
+      const selected = selectGame(games, this.current.sourceKind === "app" ? (this.current.sourceId ?? null) : null, this.focused);
+      if (selected)
+         return { ...preferences, resolvedKind: "app", sourceId: selected.id, sourceName: selected.gameName, pid: selected.pid, preferGameCapture: true };
+      if (preferences.desktopFallback) {
+         const screen =
+            sources.find((item) => item.kind === "screen" && item.id === preferences.sourceId) ??
+            (!preferences.sourceId ? sources.find((item) => item.kind === "screen") : undefined);
+         if (screen)
+            return {
+               ...preferences,
+               resolvedKind: "screen",
+               sourceId: screen.id,
+               sourceName: screen.name,
+               bounds: screen.bounds,
+               displayId: screen.displayId,
+               screenIndex: sources.filter((item) => item.kind === "screen").findIndex((item) => item.id === screen.id),
+            };
+      }
+      return { ...preferences, resolvedKind: "waiting", sourceId: "", sourceName: "Waiting for game" };
+   }
+   private async followGame(): Promise<void> {
+      if (this.autoBusy || !this.autoPreferences || !["recording", "waiting"].includes(this.current.state)) return;
+      const generation = this.autoGeneration;
+      this.autoBusy = true;
+      try {
+         const configuration = await this.autoConfiguration(this.autoPreferences, this.autoSources);
+         if (generation !== this.autoGeneration) return;
+         const key = this.configurationKey(configuration);
+         if (key !== this.autoKey) {
+            await this.command({ action: "source", ...configuration });
+            if (generation === this.autoGeneration) this.autoKey = key;
+         }
+      } catch (error) {
+         this.update({ state: "waiting", message: error instanceof Error ? error.message : "Waiting for game" });
+      } finally {
+         this.autoBusy = false;
+      }
+   }
+   private configurationKey(configuration: Record<string, unknown>): string {
+      return `${configuration["resolvedKind"]}:${configuration["sourceId"]}:${configuration["pid"] ?? ""}`;
    }
    private update(value: Partial<RecorderState>): void {
       this.current = { ...this.current, ...value };
@@ -121,7 +215,7 @@ export class Recorder {
       let executable = this.executable;
       // Unpackaged development uses the same staged runtime as packaged builds.
       if (!existsSync(executable) && !this.options.nativePath) executable = this.developmentExecutable;
-      if ((process.platform !== "win32" && process.platform !== "linux") || !existsSync(executable))
+      if ((process.platform !== "win32" && process.platform !== "linux" && process.platform !== "darwin") || !existsSync(executable))
          throw new Error("Native recording is not available on this platform yet");
       this.ready = new Promise<void>((resolve, reject) => {
          this.readyResolve = resolve;
@@ -166,6 +260,10 @@ export class Recorder {
          this.ready = null;
          if (this.timer) clearInterval(this.timer);
          this.timer = null;
+         this.autoPreferences = null;
+         this.autoGeneration++;
+         this.candidatesResolve?.([]);
+         this.candidatesResolve = null;
          if (this.current.state !== "stopped" || this.requests.size) this.error(`Recording stopped unexpectedly${code ? ` with exit code ${code}` : ""}`);
          this.requests.clear();
          for (const command of this.commands.values()) {
@@ -187,6 +285,7 @@ export class Recorder {
       await this.refreshWindows();
       this.timer = setInterval(() => {
          if (this.process) this.send({ action: "status" });
+         void this.followGame();
       }, 1000);
    }
    private message(value: NativeMessage): void {
@@ -210,6 +309,29 @@ export class Recorder {
          this.windowsResolve?.();
          this.windowsResolve = null;
       }
+      const candidates: unknown = value.candidates ?? value.windows;
+      if (value.event === "candidates" && Array.isArray(candidates)) {
+         this.candidatesResolve?.(
+            candidates.filter(
+               (item: unknown): item is GameCandidate =>
+                  !!item &&
+                  typeof item === "object" &&
+                  "id" in item &&
+                  typeof item.id === "string" &&
+                  "name" in item &&
+                  typeof item.name === "string" &&
+                  "executable" in item &&
+                  typeof item.executable === "string" &&
+                  "pid" in item &&
+                  Number.isSafeInteger(item.pid) &&
+                  "foreground" in item &&
+                  typeof item.foreground === "boolean" &&
+                  "fullscreen" in item &&
+                  typeof item.fullscreen === "boolean"
+            )
+         );
+         this.candidatesResolve = null;
+      }
       if (value.event === "audio-devices" && Array.isArray(value.devices)) {
          this.devicesResolve?.(value.devices.filter((device) => typeof device.id === "string" && typeof device.name === "string"));
          this.devicesResolve = null;
@@ -225,10 +347,20 @@ export class Recorder {
          this.fullscreen = value.fullscreen === true;
          this.update({
             ...(value.active
-               ? { state: value.waiting ? ("waiting" as const) : ("recording" as const), message: value.waiting ? "Waiting for application" : "" }
+               ? {
+                    state: value.waiting ? ("waiting" as const) : ("recording" as const),
+                    message: value.waiting
+                       ? value.message || (this.autoPreferences ? "Waiting for game" : "Waiting for application")
+                       : value.sourceKind === "screen" && this.autoPreferences
+                         ? "Recording screen fallback"
+                         : "",
+                 }
                : {}),
             availableSeconds: Number.isFinite(value.availableSeconds) ? value.availableSeconds! : 0,
             pendingSaves: this.requests.size,
+            ...(value.sourceId !== undefined ? { sourceId: value.sourceId } : {}),
+            ...(value.source !== undefined ? { sourceName: value.source } : {}),
+            ...(value.sourceKind !== undefined ? { sourceKind: value.sourceKind } : {}),
          });
       }
       if (value.event === "saved" && value.path) {
@@ -268,11 +400,11 @@ export class Recorder {
          this.send({ action: "windows" });
       });
    }
-   private configuration(preferences: Preferences, sources: CaptureSource[]): Record<string, unknown> {
+   private async configuration(preferences: Preferences, sources: CaptureSource[]): Promise<Record<string, unknown>> {
+      if (preferences.sourceKind === "auto") return this.autoConfiguration(preferences, sources);
       const selected =
          sources.find((s) => s.id === preferences.sourceId && s.kind === preferences.sourceKind) ??
          (!preferences.sourceId && preferences.sourceKind === "screen" ? sources.find((s) => s.kind === "screen") : undefined);
-      if (preferences.sourceKind === "auto") throw new Error("Automatic game detection is not available yet. Choose a screen or application");
       if (!selected) throw new Error("The selected capture source is unavailable");
       this.source = selected.name;
       const screenIndex = sources.filter((s) => s.kind === "screen").findIndex((s) => s.id === selected.id);
@@ -280,19 +412,33 @@ export class Recorder {
       const window = this.windows.find((w) => w.value.split(":")[0] === selected.name || w.name.endsWith(`: ${selected.name}`));
       if (preferences.sourceKind === "app" && !selected.id.startsWith("window:"))
          throw new Error("This application does not have a supported capture identity");
-      return { ...preferences, sourceName: selected.name, screenIndex: Math.max(0, screenIndex), bounds: selected.bounds, window: window?.value ?? "" };
+      return {
+         ...preferences,
+         sourceName: selected.name,
+         displayId: selected.displayId,
+         screenIndex: Math.max(0, screenIndex),
+         bounds: selected.bounds,
+         window: window?.value ?? "",
+      };
    }
    async start(preferences: Preferences, sources: CaptureSource[] = []): Promise<void> {
       this.update({ state: "starting", message: "Starting recording" });
       try {
          await this.initialize();
-         await this.command({ action: "start", ...this.configuration(preferences, sources) });
+         const configuration = await this.configuration(preferences, sources);
+         await this.command({ action: "start", ...configuration });
+         this.autoGeneration++;
+         this.autoPreferences = preferences.sourceKind === "auto" ? preferences : null;
+         this.autoSources = sources;
+         this.autoKey = this.configurationKey(configuration);
       } catch (error) {
          this.update({ state: "error", message: error instanceof Error ? error.message : "Recording could not start" });
          throw error;
       }
    }
    async stop(): Promise<void> {
+      this.autoPreferences = null;
+      this.autoGeneration++;
       if (this.process) await this.command({ action: "stop" });
    }
    async setAudio(value: { source: "capture" | "microphone"; volume: number; muted: boolean }): Promise<void> {
@@ -301,8 +447,14 @@ export class Recorder {
    }
    async switchSource(preferences: Preferences, sources: CaptureSource[] = []): Promise<void> {
       if (this.process) {
+         this.autoPreferences = null;
+         this.autoGeneration++;
          await this.refreshWindows();
-         await this.command({ action: "source", ...this.configuration(preferences, sources) });
+         const configuration = await this.configuration(preferences, sources);
+         await this.command({ action: "source", ...configuration });
+         this.autoPreferences = preferences.sourceKind === "auto" ? preferences : null;
+         this.autoSources = sources;
+         this.autoKey = this.configurationKey(configuration);
       }
    }
    async save(file?: string, requestedAt = Date.now()): Promise<void> {
@@ -314,6 +466,8 @@ export class Recorder {
       await this.command({ action: "save", path: file, requestId, requestedAt, requestAgeMs: Math.max(0, Date.now() - requestedAt) });
    }
    async close(options: { cancel?: boolean } = {}): Promise<void> {
+      this.autoPreferences = null;
+      this.autoGeneration++;
       if (!this.process) return;
       const child = this.process;
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));

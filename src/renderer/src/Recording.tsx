@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { AppWindow, AudioLines, Clapperboard, Circle, CircleStop, Mic, MicOff, Monitor, RefreshCw, Volume2, VolumeX, WandSparkles } from "lucide-react";
-import type { AppState, CaptureSource, Preferences, SourceKind } from "../../shared/types";
-import { api, Button, Empty, IconButton, LevelSlider, Segmented, Toggle } from "./ui";
+import type { AppState, CaptureSource, GameCandidate, Preferences, SourceKind } from "../../shared/types";
+import { api, Button, Empty, IconButton, LevelSlider, Segmented, Select, Toggle } from "./ui";
 import type { Run } from "./ui";
 import { useSourcePreview } from "./useSourcePreview";
 
 export function Recording({ state, visible, run, pulse }: { state: AppState; visible: boolean; run: Run; pulse: number }) {
    const [sources, setSources] = useState<CaptureSource[]>([]);
+   const [games, setGames] = useState<GameCandidate[]>([]);
+   const [addingGame, setAddingGame] = useState(false);
+   const [newGameId, setNewGameId] = useState("");
    const [loading, setLoading] = useState(false);
    const [saving, setSaving] = useState(false);
    const [pulsing, setPulsing] = useState(false);
@@ -30,7 +33,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
    }, [visible, active]);
    const source =
       state.preferences.sourceKind === "auto"
-         ? undefined
+         ? sources.find((item) => item.id === state.recorder.sourceId)
          : (sources.find((item) => item.id === state.preferences.sourceId) ??
            (!state.preferences.sourceId && state.preferences.sourceKind === "screen" ? sources.find((item) => item.kind === "screen") : undefined));
    const preview = useSourcePreview(source?.id, visible && state.preferences.setupComplete);
@@ -39,6 +42,24 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
       await run(async () => setSources(await api.sources()));
       setLoading(false);
    };
+   useEffect(() => {
+      if (!visible || state.preferences.sourceKind !== "auto" || !state.recorder.supported) return;
+      let disposed = false;
+      const update = async () => {
+         try {
+            const candidates = await api.games();
+            if (!disposed) setGames(candidates);
+         } catch {
+            /* The recorder reports connection failures separately. */
+         }
+      };
+      void update();
+      const timer = window.setInterval(() => void update(), 2000);
+      return () => {
+         disposed = true;
+         window.clearInterval(timer);
+      };
+   }, [visible, state.preferences.sourceKind, state.preferences.customGames, state.recorder.supported]);
    useEffect(() => {
       if (!visible || !state.preferences.microphone) return;
       void run(async () => setAudioDevices(await api.audioDevices()));
@@ -134,7 +155,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
       });
    };
    const switchKind = (kind: SourceKind) => {
-      const first = sources.find((item) => item.kind === kind);
+      const first = sources.find((item) => item.kind === (kind === "auto" ? "screen" : kind));
       preferences({ sourceKind: kind, sourceId: first?.id ?? state.preferences.sourceId });
    };
    const save = async () => {
@@ -199,7 +220,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                   ) : (
                      <Empty
                         icon={<Monitor size={38} />}
-                        title={state.preferences.sourceKind === "auto" ? "Waiting for an application" : "Choose what to capture"}
+                        title={state.preferences.sourceKind === "auto" ? "Waiting for game" : "Choose what to capture"}
                         detail={
                            state.preferences.sourceKind === "auto"
                               ? "Auto capture will follow a supported game. Your desktop stays private unless fallback is enabled."
@@ -316,7 +337,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                   <div className="capture-actions">
                      <button
                         className={`record-action ${active ? "is-recording" : ""}`}
-                        disabled={state.recorder.state === "starting" || !state.recorder.supported || (!active && state.preferences.sourceKind === "auto")}
+                        disabled={state.recorder.state === "starting" || !state.recorder.supported}
                         onClick={() => void run(active ? () => api.stopRecording() : () => api.startRecording())}
                      >
                         {active ? <CircleStop size={50} strokeWidth={1.7} /> : <Circle size={50} strokeWidth={1.7} />}
@@ -355,14 +376,64 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                {state.preferences.sourceKind === "auto" ? (
                   <div className="auto-source">
                      <WandSparkles size={25} />
-                     <h3>Auto capture unavailable</h3>
-                     <p>This build supports selecting a screen or application directly. Automatic game selection isn't available yet.</p>
+                     <h3>{state.recorder.sourceName && active ? state.recorder.sourceName : "Follow the active game"}</h3>
+                     <p>Games are detected locally. Switching to another app keeps your game selected.</p>
+                     {games
+                        .filter((game) => game.gameName)
+                        .map((game) => (
+                           <div className={`source-row ${game.id === state.recorder.sourceId ? "selected" : ""}`} key={game.id}>
+                              <AppWindow size={18} />
+                              <span>{game.gameName}</span>
+                              {game.id === state.recorder.sourceId && <span className="source-selected" />}
+                           </div>
+                        ))}
+                     <Button className="quiet" onClick={() => setAddingGame(!addingGame)}>
+                        Add game
+                     </Button>
+                     {addingGame && (
+                        <div className="field-stack">
+                           <Select label="Running application" value={newGameId} onChange={setNewGameId}>
+                              <option value="">Choose an application</option>
+                              {games.map((game) => (
+                                 <option key={game.id} value={game.id}>
+                                    {game.name}
+                                 </option>
+                              ))}
+                           </Select>
+                           <Button
+                              disabled={!games.some((game) => game.id === newGameId)}
+                              onClick={() => {
+                                 const game = games.find((item) => item.id === newGameId);
+                                 if (!game) return;
+                                 preferences({
+                                    customGames: [
+                                       ...state.preferences.customGames.filter((item) => item.executable !== game.executable),
+                                       { name: game.name, executable: game.executable },
+                                    ],
+                                 });
+                                 setAddingGame(false);
+                              }}
+                           >
+                              Add selected game
+                           </Button>
+                        </div>
+                     )}
+                     {state.preferences.customGames.map((game) => (
+                        <div className="source-row" key={game.executable}>
+                           <span title={game.executable}>{game.name}</span>
+                           <Button
+                              className="quiet"
+                              onClick={() => preferences({ customGames: state.preferences.customGames.filter((item) => item.executable !== game.executable) })}
+                           >
+                              Remove
+                           </Button>
+                        </div>
+                     ))}
                      <Toggle
                         label="Screen fallback"
                         detail="Record the selected screen when no game is available."
                         checked={state.preferences.desktopFallback}
                         onChange={(value) => preferences({ desktopFallback: value })}
-                        disabled
                      />
                      {state.preferences.desktopFallback &&
                         sources

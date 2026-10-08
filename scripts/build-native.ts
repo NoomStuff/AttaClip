@@ -25,6 +25,10 @@ if (process.platform === "linux") {
    await import("./build-native-linux");
    process.exit(0);
 }
+if (process.platform === "darwin") {
+   await import("./build-recorder-macos");
+   process.exit(0);
+}
 if (process.platform !== "win32") {
    await mkdir(runtime, { recursive: true });
    await writeFile(
@@ -148,9 +152,11 @@ const binaries = [
    "swresample-6.dll",
    "obs-ffmpeg-mux.exe",
    "obs-nvenc-test.exe",
+   "obs-amf-test.exe",
+   "obs-qsv-test.exe",
 ];
 for (const name of binaries) await copyFile(path.join(bin, name), path.join(runtime, name));
-const modules = ["win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc", "obs-x264"];
+const modules = ["win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc", "obs-qsv11", "obs-x264"];
 await mkdir(path.join(runtime, "obs-plugins", "64bit"), { recursive: true });
 for (const name of modules) {
    await copyFile(path.join(obs, "obs-plugins", "64bit", `${name}.dll`), path.join(runtime, "obs-plugins", "64bit", `${name}.dll`));
@@ -167,7 +173,7 @@ await writeFile(
          source: `https://github.com/obsproject/obs-studio/tree/${version}`,
          build: "scripts/build-native.ts",
          modules,
-         encoder: "NVENC H.264, explicit x264 software fallback",
+         encoder: "Device-probed NVENC, AMD AMF or Intel QSV H.264; explicit x264 software fallback",
          format: "Matroska",
          platform: "Windows x64",
          runtimeArchive: process.env["ATTACLIP_OBS_ROOT"]
@@ -196,7 +202,7 @@ await writeFile(
                ])
             )
          ),
-         limitations: ["Automatic game detection unavailable", "Avoid-overlap unavailable", "Other-platform recording unavailable"],
+         limitations: ["HDR capture is converted to SDR", "Overlap reduction preserves the preceding keyframe"],
       },
       null,
       2

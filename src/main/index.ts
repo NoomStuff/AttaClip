@@ -1,4 +1,18 @@
-import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, Menu, nativeImage, protocol, shell, Tray, session } from "electron";
+import {
+   app,
+   BrowserWindow,
+   desktopCapturer,
+   dialog,
+   globalShortcut,
+   ipcMain,
+   Menu,
+   nativeImage,
+   protocol,
+   shell,
+   Tray,
+   session,
+   systemPreferences,
+} from "electron";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { appendFile, mkdir, realpath, stat, rename as renameFile, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -47,6 +61,7 @@ const collections = new CollectionService({
 });
 const updates = new Updates(() => emitState());
 const recorder = new Recorder({
+   gameCatalogPath: join(app.getPath("userData"), "game-catalog.json"),
    onAudioLevels: (levels) => {
       if (mainWindow?.isVisible() && !mainWindow.isMinimized())
          send({ type: "audio-levels", levels: { capture: levels.capture * 100, microphone: levels.microphone * 100 } });
@@ -180,6 +195,7 @@ async function sources(): Promise<CaptureSource[]> {
             kind: s.id.startsWith("screen:") ? "screen" : "app",
             thumbnail: s.thumbnail.toDataURL(),
             ...(bounds ? { bounds } : {}),
+            ...(s.display_id ? { displayId: s.display_id } : {}),
          };
       });
    return cachedSources;
@@ -191,7 +207,8 @@ function createWindow() {
       minWidth: 980,
       minHeight: 680,
       backgroundColor: "#0c0b0e",
-      frame: false,
+      frame: process.platform === "darwin",
+      titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
       title: "AttaClip",
       icon: iconPath(),
       show: false,
@@ -260,6 +277,10 @@ async function startRecording() {
    if (startingCapture || ["starting", "recording", "waiting"].includes(recorder.status.state)) throw new Error("Recording is already running.");
    startingCapture = (async () => {
       await preferenceWrites.catch(() => undefined);
+      if (process.platform === "darwin" && preferences.microphone && systemPreferences.getMediaAccessStatus("microphone") !== "granted") {
+         if (!(await systemPreferences.askForMediaAccess("microphone")))
+            throw new Error("Allow microphone access in System Settings, or turn the microphone off.");
+      }
       const available = await sources();
       if (closingRequested) throw new Error("AttaClip is preparing to exit. Keep the app open to record.");
       await recorder.start(preferences, available);
@@ -281,7 +302,7 @@ async function saveClip() {
    send({ type: "clip-action" });
    const destination = recordingDestination(
       { ...preferences, collection: collections.root },
-      recordingSourceLabel(preferences, cachedSources),
+      preferences.sourceKind === "auto" ? (recorder.status.sourceName ?? "Game") : recordingSourceLabel(preferences, cachedSources),
       randomUUID().slice(0, 8),
       new Date(requestedAt)
    );
@@ -406,6 +427,7 @@ function handle(channel: string, fn: (...args: unknown[]) => unknown) {
 function registerIPC() {
    handle("state", () => state());
    handle("sources", () => sources());
+   handle("games", () => recorder.games(preferences.customGames));
    handle("preview-source", (id) => {
       const requested = z.string().max(200).nullable().parse(id);
       if (requested === null) {
@@ -414,8 +436,10 @@ function registerIPC() {
       }
       if (!mainWindow?.isVisible() || mainWindow.isMinimized() || !preferences.setupComplete) throw new Error("Open Recording to preview the capture source.");
       const selected =
-         cachedSources.find((source) => source.id === preferences.sourceId && source.kind === preferences.sourceKind) ??
-         (!preferences.sourceId && preferences.sourceKind === "screen" ? cachedSources.find((source) => source.kind === "screen") : undefined);
+         preferences.sourceKind === "auto"
+            ? cachedSources.find((source) => source.id === recorder.status.sourceId)
+            : (cachedSources.find((source) => source.id === preferences.sourceId && source.kind === preferences.sourceKind) ??
+              (!preferences.sourceId && preferences.sourceKind === "screen" ? cachedSources.find((source) => source.kind === "screen") : undefined));
       if (!selected || selected.id !== requested) throw new Error("The selected preview source is unavailable.");
       previewSourceId = requested;
    });
@@ -445,7 +469,10 @@ function registerIPC() {
                if (next.collection !== preferences.collection) await collections.open(next.collection);
                if (
                   ["recording", "waiting"].includes(recorder.status.state) &&
-                  (next.sourceId !== preferences.sourceId || next.sourceKind !== preferences.sourceKind || next.desktopFallback !== preferences.desktopFallback)
+                  (next.sourceId !== preferences.sourceId ||
+                     next.sourceKind !== preferences.sourceKind ||
+                     next.desktopFallback !== preferences.desktopFallback ||
+                     JSON.stringify(next.customGames) !== JSON.stringify(preferences.customGames))
                )
                   await recorder.switchSource(next, await sources());
                if (next.startWithOS !== preferences.startWithOS) await applyStartup(next.startWithOS);
@@ -460,7 +487,10 @@ function registerIPC() {
                   await collections.open(preferences.collection).catch((error: unknown) => notice(errorMessage(error), true));
                if (
                   ["recording", "waiting"].includes(recorder.status.state) &&
-                  (next.sourceId !== preferences.sourceId || next.sourceKind !== preferences.sourceKind)
+                  (next.sourceId !== preferences.sourceId ||
+                     next.sourceKind !== preferences.sourceKind ||
+                     next.desktopFallback !== preferences.desktopFallback ||
+                     JSON.stringify(next.customGames) !== JSON.stringify(preferences.customGames))
                )
                   await recorder.switchSource(preferences, cachedSources).catch((error: unknown) => notice(errorMessage(error), true));
                if (next.startWithOS !== preferences.startWithOS)
@@ -476,6 +506,7 @@ function registerIPC() {
             if (next.shortcut !== preferences.shortcut) globalShortcut.unregister(preferences.shortcut);
             if (next.sourceId !== preferences.sourceId || next.sourceKind !== preferences.sourceKind) previewSourceId = null;
             preferences = next;
+            recorder.updatePreferences(next);
             emitState();
             return state();
          });
@@ -626,7 +657,13 @@ else {
                void desktopCapturer
                   .getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } })
                   .then((available) => {
-                     if (!previewAllowed() || previewSourceId !== requested || preferences.sourceKind !== sourceKind || preferences.sourceId !== sourceId) {
+                     if (
+                        !previewAllowed() ||
+                        previewSourceId !== requested ||
+                        preferences.sourceKind !== sourceKind ||
+                        preferences.sourceId !== sourceId ||
+                        (sourceKind === "auto" && recorder.status.sourceId !== requested)
+                     ) {
                         callback(null);
                         return;
                      }

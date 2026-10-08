@@ -1,6 +1,22 @@
 # Development status
 
-Updated 9 October 2026 at 00:22 Europe/Amsterdam. This is a handoff, not extra agent instructions.
+Updated 9 October 2026 during the overnight continuation. This is a handoff, not extra agent instructions.
+
+## Current continuation
+
+Dave renewed full functional-completion authorization after using the reset. Preserve the published Windows release below. New application and recorder changes are being checkpointed separately. Auto mode is now implemented with a locally cached Discord detectable-applications catalog, independent fallback entries, and local exact-executable custom games. Discord is not required. The catalog is downloaded to app data rather than redistributed. It never receives the user's process list. Recognized foreground games win; ordinary-app focus retains the current game. Fullscreen is only a tie-breaker among recognized games. Desktop fallback remains explicit and off by default.
+
+Auto's actual Electron test passed against an isolated blue application window. It verified waiting without desktop capture, local game addition, exact target selection, continued capture during Library navigation, saved footage with matching decoded pixels, and waiting after the target closed. The Windows OBS graphics-hook test passed against a rendered Direct3D fixture. AMD and Intel encoder probes now stage alongside NVIDIA's encoder, but physical AMD/Intel encoding remains unverified. Optional overlap reduction passed real queued saves and a failed-predecessor case. A preceding keyframe can retain a small overlap, so the UI says Reduce overlap rather than promising exact removal.
+
+Linux exact-window application capture passed with the X11 compatibility source on Xvfb/Openbox. Saved blue pixels matched the selected application. Desktop audio was playing, but application capture with audio disabled stayed silent. Requesting unsupported application audio fails explicitly. Source loss preserved valid prior footage. Hardware XComposite texture capture is preferred; the compatibility method reads the selected window's named pixmap and has CPU cost. It does not crop desktop capture. Linux application audio and Wayland are still unfinished.
+
+The Mac production recorder, official-runtime stager and native/packaged proof workflow are implemented. They require an actual Mac CI run before any success claim. ScreenCaptureKit identifies exact displays/windows, carries application audio, and reports permission or stream-stop failures. Cocoa owns the main event loop; VideoToolbox uses its own settings. The interface agent can repair actual runner failures after the checkpoint pushes.
+
+All 51 unit tests, four regular Electron UI tests, strict types, lint and formatting passed during this continuation. The native Auto test passed separately. Windows native graphics-hook and overlap tests passed again after the shared Mac hooks. Private evidence stays under ignored .cache folders. Linux source collection and Electron source evidence are progressing separately; see docs/linux-source-correspondence.md. No Linux or Mac public binary is authorized by incomplete source evidence.
+
+Remaining functional proof and work include Mac actual capture and packaging, Linux application audio and Wayland, Proton recognition, native fullscreen feedback, added audio sources, device hotplug and suspend/resume, HDR handling and loaded-game impact. Do not declare completion from builds or fixtures alone. Preserve exact prior footage and honest states throughout recovery.
+
+The existing automation continue-attaclip-after-reset is active every five hours at minute 35, with failed-runs-only notifications. It resumes after usage resets and should be removed when all authorized work finishes. The current five-hour window resets on 9 October at 06:10:43 Europe/Amsterdam. Do not use a manual reset credit without Dave's instruction.
 
 ## Published Windows checkpoint
 
@@ -36,7 +52,7 @@ Private proof files remain ignored under .cache, work and isolated temporary pro
 
 ## Remaining platform work
 
-Linux/macOS provider binaries need their own corresponding-source closure before public binary release. Linux X11 recording passed actual Xvfb/PulseAudio tests with Mesa software graphics. WSL hardware D3D12 teardown hung in the driver on the first attempt. Do not treat that as verified hardware gameplay performance. macOS capture, Wayland capture and Linux application capture remain unavailable. Automatic game detection and overlap avoidance are disabled. HDR, exclusive fullscreen feedback, monitor disconnect, audio-device hotplug and loaded-game impact remain unverified.
+Linux/macOS provider binaries need their own corresponding-source closure before public binary release. Linux X11 recording passed actual Xvfb/PulseAudio tests with Mesa software graphics. WSL hardware D3D12 teardown hung in the driver on the first attempt. Do not treat that as verified hardware gameplay performance. See Current continuation for newly implemented capture modes and their remaining proof. HDR, exclusive fullscreen feedback, monitor disconnect, audio-device hotplug and loaded-game impact remain unverified.
 
 Preserve the verified Windows release while tackling these. Prioritize platform source correspondence and actual packaged testing before claiming support. macOS currently supports library/sharing only. Fullscreen feedback uses small Electron popups, not an injected native game overlay. Electron main persists during capture; closing the library does not mean every Electron process exits.
 
@@ -52,4 +68,4 @@ The macOS investigation has a separate pinned OBS 32.2.2 module probe. It compil
 
 47 unit tests, strict types and real-media integration passed during this continuation. The new registration test failed before the fix and passes after it. An isolated Linux GUI test disables Chromium sandboxing for the private WSL fixture. This does not prove normal desktop sandbox startup or hardware gameplay performance. Private captures stay ignored.
 
-Weekly account usage reached 98 percent. The next weekly reset is 14 October 2026 at 12:56 Europe/Amsterdam. Do not consume the account's manual reset credit without Dave's instruction. The existing continuation automation now has one wake on 14 October at 13:05 Europe/Amsterdam, after the weekly reset. Agents have completed their checkpoints and no test processes remain active. Check latest main CI before new work. Linux and Mac module checks passed at 8eff949; the Windows Checks run was still finishing when this handoff was written. Do not repeat or replace the published Windows release.
+The earlier weekly-limit pause ended after Dave used a reset. Current continuation above supersedes that schedule. Check latest main CI before new work, and never repeat or replace the published Windows release.

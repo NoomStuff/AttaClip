@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.attaclip.recorder</string>
+  <key>CFBundleName</key><string>AttaClip recorder</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Record your microphone in clips when you enable it.</string>
+  <key>NSScreenCaptureUsageDescription</key><string>Capture the screen or application you select.</string>
+</dict></plist>

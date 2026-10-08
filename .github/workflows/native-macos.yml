@@ -1,0 +1,56 @@
+name: macOS native capture
+on:
+   workflow_dispatch:
+   push:
+      paths:
+         - native/macos/**
+         - native/recorder.cpp
+         - native/CMakeLists.txt
+         - scripts/build-recorder-macos.ts
+         - scripts/smoke-macos.py
+         - scripts/test-macos-packaged.ts
+         - .github/workflows/native-macos.yml
+permissions:
+   contents: read
+jobs:
+   capture:
+      runs-on: macos-15
+      timeout-minutes: 30
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - run: bun install --frozen-lockfile
+         - name: Stage verified media tools
+           run: |
+              bun scripts/provision-media.ts
+              bun run bundle:media
+         - name: Build and stage matching macOS recorder
+           run: bun scripts/build-recorder-macos.ts
+         - name: Verify actual screen and window recording with generated audio
+           run: python3 scripts/smoke-macos.py
+         - name: Build the actual macOS application
+           run: |
+              bun run build:icons
+              bun run build:notices
+              bun run build
+              bunx electron-builder --mac --dir --publish never
+           env:
+              CSC_IDENTITY_AUTO_DISCOVERY: "false"
+         - name: Verify packaged application capture and sharing
+           run: bun scripts/test-macos-packaged.ts
+         - uses: actions/upload-artifact@v7
+           if: always()
+           with:
+              name: macOS-native-capture-proof
+              path: |
+                 .cache/macos-capture/**/proof.json
+                 .cache/macos-capture/**/fixture.json
+                 .cache/macos-capture/**/*.log
+                 .cache/macos-native/link-proof.txt
+                 .cache/macos-native/build/CMakeFiles/CMakeConfigureLog.yaml
+                 .cache/macos-packaged/proof.json
+                 .cache/macos-packaged/fixture.log
+                 resources/recorder/provenance.json
+              retention-days: 7

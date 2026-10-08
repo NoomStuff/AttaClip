@@ -1,0 +1,9 @@
+cmake_minimum_required(VERSION 3.24)
+project(attaclip_native_fixture LANGUAGES CXX)
+if(NOT WIN32)
+  message(FATAL_ERROR "The D3D fixture requires Windows")
+endif()
+add_executable(attaclip-d3d-fixture d3d-window.cpp)
+target_link_libraries(attaclip-d3d-fixture PRIVATE d3d11 dxgi user32)
+target_compile_definitions(attaclip-d3d-fixture PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+

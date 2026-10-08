@@ -31,6 +31,10 @@ export const preferencesSchema = z
       microphoneVolume: z.number().min(0).max(2),
       microphoneMuted: z.boolean(),
       desktopFallback: z.boolean(),
+      customGames: z
+         .array(z.object({ name: z.string().trim().min(1).max(200), executable: z.string().min(1).max(4096) }).strict())
+         .max(500)
+         .default([]),
       shareSizeMB: z.number().min(1).max(2000),
       autoShare: z.boolean(),
       startWithOS: z.boolean(),

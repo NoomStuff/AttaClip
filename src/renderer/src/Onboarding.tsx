@@ -124,13 +124,12 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
                            </>
                         ) : (
                            <>
-                              <p className="setup-auto-detail">Automatic game selection isn't available in this build. Choose Screen or App to continue.</p>
+                              <p className="setup-auto-detail">Follow the active game. Recording waits when no game is found.</p>
                               <Toggle
                                  label="Screen fallback"
                                  detail="Record a screen when no game is found. Off by default."
                                  checked={draft.desktopFallback}
                                  onChange={(value) => change("desktopFallback", value)}
-                                 disabled
                               />
                               {draft.desktopFallback && (
                                  <Select label="Fallback screen" value={draft.sourceId} onChange={(value) => change("sourceId", value)}>
@@ -317,11 +316,7 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
                         {draft.autoRecord ? "Start recording" : "Open AttaClip"}
                      </Button>
                   ) : (
-                     <Button
-                        className="primary"
-                        disabled={(step === 0 && draft.sourceKind === "auto") || (step === 3 && Boolean(customQualityError(draft)))}
-                        onClick={() => setStep(step + 1)}
-                     >
+                     <Button className="primary" disabled={step === 3 && Boolean(customQualityError(draft))} onClick={() => setStep(step + 1)}>
                         Continue
                         <ArrowRight size={16} />
                      </Button>

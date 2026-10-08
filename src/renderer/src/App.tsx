@@ -76,15 +76,16 @@ export function App() {
    const recorder = state?.recorder;
    const active = recorder?.state === "recording";
    const status = active
-      ? "Recording"
+      ? recorder?.message || "Recording"
       : recorder?.state === "waiting"
-        ? "Waiting for application"
+        ? recorder?.message || "Waiting for application"
         : recorder?.state === "starting"
           ? "Starting recording"
           : recorder?.state === "error"
             ? "Recording stopped"
             : "Not recording";
-   const captureName = state?.preferences.sourceKind === "screen" ? "Screen" : state?.preferences.sourceKind === "auto" ? "Auto" : "Application";
+   const captureName =
+      recorder?.sourceName || (state?.preferences.sourceKind === "screen" ? "Screen" : state?.preferences.sourceKind === "auto" ? "Auto" : "Application");
    return (
       <div className="app-shell">
          <header className="titlebar">

@@ -4,7 +4,22 @@ export interface CaptureSource {
    name: string;
    kind: "screen" | "app";
    thumbnail: string;
+   displayId?: string;
    bounds?: { x: number; y: number; width: number; height: number };
+}
+export interface GameCandidate {
+   id: string;
+   name: string;
+   executable: string;
+   pid: number;
+   foreground: boolean;
+   fullscreen: boolean;
+   arguments?: string;
+   gameName?: string;
+}
+export interface CustomGame {
+   name: string;
+   executable: string;
 }
 export interface Preferences {
    collection: string;
@@ -26,6 +41,7 @@ export interface Preferences {
    microphoneVolume: number;
    microphoneMuted: boolean;
    desktopFallback: boolean;
+   customGames: CustomGame[];
    shareSizeMB: number;
    autoShare: boolean;
    startWithOS: boolean;
@@ -89,6 +105,9 @@ export interface RecorderState {
    backend: string;
    supported: boolean;
    pendingSaves: number;
+   sourceId?: string;
+   sourceName?: string;
+   sourceKind?: "screen" | "app" | "waiting";
 }
 export interface UpdateState {
    state: "idle" | "checking" | "available" | "downloading" | "ready" | "error";
@@ -118,6 +137,7 @@ export interface AppEvent {
 export interface DesktopAPI {
    state(): Promise<AppState>;
    sources(): Promise<CaptureSource[]>;
+   games(): Promise<GameCandidate[]>;
    previewSource(sourceId: string | null): Promise<void>;
    audioDevices(): Promise<{ id: string; name: string }[]>;
    savePreferences(value: Preferences): Promise<AppState>;
