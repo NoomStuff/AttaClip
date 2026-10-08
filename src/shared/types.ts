@@ -118,6 +118,7 @@ export interface AppEvent {
 export interface DesktopAPI {
    state(): Promise<AppState>;
    sources(): Promise<CaptureSource[]>;
+   previewSource(sourceId: string | null): Promise<void>;
    audioDevices(): Promise<{ id: string; name: string }[]>;
    savePreferences(value: Preferences): Promise<AppState>;
    chooseFolder(): Promise<string | null>;

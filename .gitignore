@@ -2,6 +2,7 @@ node_modules/
 out/
 release/
 resources/media/
+resources/notices/
 work/
 .zcode/
 build/.icons-cache

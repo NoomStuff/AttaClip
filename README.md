@@ -25,9 +25,11 @@ bun run build:native
 bun run dev
 ```
 
-`provision-media.ts` downloads checksum-pinned FFmpeg and ffprobe builds. It exports their paths to later GitHub Actions steps. For a local shell, set `FFMPEG_PATH` and `FFPROBE_PATH` to the printed paths before running `bundle:media`, or supply your own compatible binaries. `bundle:media` stages them and records their hashes and build configuration. Development runs work without a native helper, but recording stays unavailable until it is built. The UI never simulates successful recording.
+Windows uses AttaClip's controlled FFmpeg build. In Ubuntu 24.04, including WSL, install `gcc-mingw-w64-x86-64`, `g++-mingw-w64-x86-64`, `binutils-mingw-w64-x86-64`, `make`, `nasm`, `meson`, `ninja-build`, and `pkg-config`. Run `bun scripts/release-sources.ts --controlled-inputs --collect-only`, then `bash scripts/build-media-windows.sh` in Ubuntu. Back in Windows, run `bun scripts/controlled-media.ts` before the commands above. CI builds the same recipe and passes its captured inputs and binaries to Windows verification.
 
-The first native backend targets Windows with an OBS runtime. macOS and Linux application packaging are targets, but their capture backends require platform verification. Automatic game detection is not yet implemented. Choose a screen or application explicitly.
+On Linux and macOS, `provision-media.ts` downloads checksum-pinned provider builds. It exports binary paths to later GitHub Actions steps. For a local shell, set `FFMPEG_PATH` and `FFPROBE_PATH` to the printed paths before running `bundle:media`. You can also supply compatible binaries for development. `bundle:media` stages them and records their hashes and configuration. A development override does not establish release source correspondence. Development runs work without a native helper, but recording stays unavailable until it is built. The UI never simulates successful recording.
+
+Windows capture uses a pinned OBS runtime. Linux X11 screen capture and PulseAudio recording also have a native backend. On Ubuntu 24.04, install the official OBS PPA package `obs-studio=32.2.0-0obsproject1~noble`, CMake, g++, make, pkg-config, libx11-dev and libsimde-dev before building it. Linux application capture and Wayland capture remain unavailable. macOS currently supports the library and sharing only. Automatic game detection is not implemented. Choose a screen or application explicitly where supported.
 
 ## Verification
 
@@ -36,23 +38,27 @@ bun run verify
 bun run test:media
 bun run test:ui
 bun run test:native
+bun run test:capture-loss
+bun run test:ui:native
 bun run package
 bun run test:packaged
 ```
 
 `verify` checks formatting, lint, unit tests, strict types, and the application build. Media verification creates isolated real videos and checks full-duration size-limited exports, original preservation, cancellation, playback tracks, collection recovery, and safe file ownership. UI tests launch the actual Electron app against an isolated profile. Screenshots and traces land in `test-results`. Native and packaged capture tests record the selected screen on a supported Windows machine, check queued saves through source changes and stopping, and decode the actual outputs. Run those with test content visible on screen.
 
+`test:capture-loss` records an isolated application, loses its source for longer than the configured history, saves the retained footage, then verifies recovery and full decoding. `test:ui:native` verifies actual capture while preview streams end during navigation, minimize and close to tray. The regular UI suite tests moving preview pixels without requiring NVENC. Linux's dedicated Actions workflow records real X11 pixels and PulseAudio tones through an isolated Xvfb display and null audio sink.
+
 `ATTACLIP_PROFILE`, `ATTACLIP_COLLECTION`, and `ATTACLIP_TEST=1` isolate manual or automated runs from your real preferences and library. The test flag suppresses notification windows and OS startup changes. Never point destructive tests at a real collection.
 
 ## Recording guarantees and current limits
 
-Recording and clip requests belong to the native helper, not the library renderer. Source switches keep a stable output size. Clip requests retain their request boundaries while writing is queued. Stopping clears unsaved history but preserves accepted saves.
+Recording and clip requests belong to the native helper, not the library renderer. Source switches keep a stable output size. Clip requests retain their request boundaries while writing is queued. Stopping clears unsaved history but preserves accepted saves. If an application disappears, AttaClip preserves the last available footage and identifies it when saved. Capture recovery begins a fresh history to avoid a timestamp gap.
 
-Low, Standard, High, and Custom profiles expose the actual resolution and frame rate. Custom settings include encoder quality. Hardware encoding is preferred; software encoding requires an explicit opt-in. Microphone selection, gain and mute controls belong to the recorder. Closing or minimizing the library stops its preview work while capture continues.
+Low, Standard, High, and Custom profiles expose the actual resolution and frame rate. Custom settings include encoder quality. Hardware encoding is preferred; software encoding requires an explicit opt-in. Microphone selection, gain and mute controls belong to the recorder. The moving preview captures only the selected source, without audio. Leaving the recording page, closing or minimizing the library releases that preview stream while recording continues.
 
 Originals currently use MKV for recoverable saving. Compatible MP4 playback copies are made on demand, without replacing the original. Shareables use H.264 video and the master audio mix in MP4. Their completed size and duration are checked before publication. A too-small budget produces an error rather than a truncated clip.
 
-Shareable encoding is bounded, below-normal-priority software encoding. It is still extra work while recording. Native fullscreen popup behavior, encoder selection, HDR, application-audio compatibility, and cross-platform recording need further measurements. A successful installer build alone does not validate capture.
+Shareable encoding is bounded, below-normal-priority software encoding. It is still extra work while recording. Windows NVENC and Linux software recording have passed actual media checks. Native fullscreen popup behavior, HDR, microphone amplitude, application-audio compatibility, and gameplay impact still need measurements. A successful installer build alone does not validate capture.
 
 ## Builds and releases
 

@@ -6,7 +6,10 @@ on:
 permissions:
    contents: read
 jobs:
+   controlled-media:
+      uses: ./.github/workflows/controlled-media.yml
    package:
+      needs: controlled-media
       strategy:
          fail-fast: false
          matrix:
@@ -19,11 +22,26 @@ jobs:
            with:
               bun-version: "1.4.2"
          - run: bun install --frozen-lockfile
+         - uses: actions/download-artifact@v8
+           if: runner.os == 'Windows'
+           with:
+              name: controlled-windows-media
+              path: work/
+         - name: Verify and record the cross build on Windows
+           if: runner.os == 'Windows'
+           run: bun scripts/controlled-media.ts
          - run: bun scripts/provision-media.ts
          - run: bun run bundle:media
          - run: bun run build:icons
+         - run: bun run build:notices
          - name: Build application
            run: bun run build
+         - name: Install matching Linux recorder dependencies
+           if: runner.os == 'Linux'
+           run: |
+              sudo add-apt-repository -y ppa:obsproject/obs-studio
+              sudo apt-get update
+              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libsimde-dev
          - name: Build recorder
            run: bun run build:native
          - name: Package without automatic publishing

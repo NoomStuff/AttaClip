@@ -51,7 +51,13 @@ export class Updates {
             this.updater.on("update-downloaded", (p) => this.set({ state: "ready", version: p.version, progress: 100, message: "Ready to restart" }));
             this.updater.on("update-not-available", () => this.set({ state: "idle", version: "", progress: 0, message: "You're up to date" }));
             this.updater.on("error", () =>
-               this.set({ state: "error", version: "", progress: 0, message: "Couldn't check or download updates. Try again later." })
+               this.set({
+                  state: "error",
+                  version: "",
+                  progress: 0,
+                  message:
+                     this.state.state === "ready" ? "Couldn't install the update. Try again later." : "Couldn't check or download updates. Try again later.",
+               })
             );
          }
          await this.updater.checkForUpdates();

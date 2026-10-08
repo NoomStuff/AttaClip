@@ -5,7 +5,8 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-if (process.platform !== "win32") throw new Error("This real capture smoke test requires Windows and an NVENC GPU");
+if (process.platform !== "win32") throw new Error("This real capture smoke test requires Windows");
+const software = Boolean(process.env["ATTACLIP_NATIVE_TEST_SOFTWARE"]);
 const runtime = path.resolve("resources/recorder");
 const folder = path.resolve(".cache", "native-smoke", randomUUID());
 await mkdir(folder, { recursive: true });
@@ -17,6 +18,8 @@ interface Event {
    source?: string;
    message?: string;
    devices?: unknown[];
+   id?: string;
+   encoder?: string;
 }
 const events: Event[] = [];
 const child = spawn(path.join(runtime, "attaclip-recorder.exe"), [runtime], { cwd: runtime, stdio: "pipe", windowsHide: true });
@@ -41,6 +44,23 @@ try {
    send({ action: "audio-devices" });
    const devices = await wait((event) => event.event === "audio-devices");
    assert(Array.isArray(devices.devices));
+   if (software) {
+      send({
+         action: "start",
+         id: "software-denied",
+         sourceKind: "screen",
+         screenIndex: 0,
+         quality: "low",
+         clipSeconds: 2,
+         captureAudio: false,
+         microphone: false,
+         allowSoftwareEncoder: false,
+      });
+      const denied = await wait((event) => event.id === "software-denied");
+      assert.equal(denied.event, "error");
+      assert(denied.message?.includes("Software"), denied.message ?? "The missing hardware encoder must require software opt-in");
+      send({ action: "stop" });
+   }
    send({
       action: "start",
       sourceKind: "screen",
@@ -50,8 +70,10 @@ try {
       quality: "low",
       microphone: false,
       captureAudio: true,
+      allowSoftwareEncoder: software,
    });
-   await wait((event) => event.event === "recording");
+   const recording = await wait((event) => event.event === "recording");
+   assert(software ? recording.encoder === "obs_x264" : recording.encoder?.startsWith("obs_nvenc"), recording.encoder ?? "The actual encoder must be reported");
    await delay(4000);
    const first = path.join(folder, "first.mkv");
    const second = path.join(folder, "second.mkv");
@@ -91,6 +113,7 @@ try {
    }
    send({
       action: "start",
+      id: "collision-start",
       sourceKind: "screen",
       screenIndex: 0,
       sourceName: "Initial screen",
@@ -98,7 +121,9 @@ try {
       quality: "low",
       microphone: false,
       captureAudio: true,
+      allowSoftwareEncoder: software,
    });
+   assert.equal((await wait((event) => event.id === "collision-start")).event, "response");
    await delay(3000);
    const existing = path.join(folder, "must-not-overwrite.mkv");
    await writeFile(existing, "keep existing user file");

@@ -1,0 +1,38 @@
+name: Linux capture
+
+on:
+   push:
+   pull_request:
+   workflow_dispatch:
+
+permissions:
+   contents: read
+
+jobs:
+   actual-capture:
+      runs-on: ubuntu-24.04
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - name: Install matching OBS headers and runtime
+           run: |
+              sudo add-apt-repository -y ppa:obsproject/obs-studio
+              sudo apt-get update
+              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libsimde-dev xvfb x11-apps ffmpeg pulseaudio pulseaudio-utils
+         - name: Build native X11 recorder
+           run: bun scripts/build-native-linux.ts
+         - name: Record actual screen and audio
+           run: python3 scripts/smoke-linux.py resources/recorder
+         - name: Keep synthetic capture evidence
+           if: always()
+           uses: actions/upload-artifact@v7
+           with:
+              name: linux-capture-evidence
+              path: |
+                 .cache/linux-smoke/**/measurements.json
+                 .cache/linux-smoke/**/events.json
+                 .cache/linux-smoke/**/*.log
+              if-no-files-found: ignore

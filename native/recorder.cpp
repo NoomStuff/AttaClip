@@ -16,6 +16,10 @@
 #include <util/pipe.h>
 #include <util/platform.h>
 #include <vector>
+#ifdef __linux__
+#include <X11/Xlib.h>
+#include <obs-nix-platform.h>
+#endif
 #ifdef _WIN32
 #include <objbase.h>
 #include <psapi.h>
@@ -25,9 +29,31 @@
 #endif
 using json = nlohmann::json;
 std::mutex stdoutMutex;
+std::string muxExecutable = "obs-ffmpeg-mux.exe";
+const char *graphicsModule() {
+#ifdef _WIN32
+  return "libobs-d3d11.dll";
+#else
+  return "libobs-opengl.so";
+#endif
+}
+const char *microphoneType() {
+#ifdef _WIN32
+  return "wasapi_input_capture";
+#else
+  return "pulse_input_capture";
+#endif
+}
+const char *desktopType() {
+#ifdef _WIN32
+  return "wasapi_output_capture";
+#else
+  return "pulse_output_capture";
+#endif
+}
 void idleVideo() {
   obs_video_info info{};
-  info.graphics_module = "libobs-d3d11.dll";
+  info.graphics_module = graphicsModule();
   info.fps_num = 1;
   info.fps_den = 1;
   info.base_width = 16;
@@ -72,6 +98,7 @@ struct Request {
 };
 struct Job {
   Request request;
+  double secondsSinceCapture = 0;
   std::string source;
   std::vector<Packet> packets;
   std::vector<std::vector<uint8_t>> headers;
@@ -99,6 +126,7 @@ public:
   std::deque<Job> jobs;
   std::thread writer;
   bool quitting = false;
+  bool captureInterrupted = false;
   std::atomic<bool> active{false};
   std::atomic<int> pending{0};
   std::atomic<uintptr_t> targetWindow{0};
@@ -215,6 +243,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex);
       ring.clear();
       bytes = 0;
+      captureInterrupted = false;
     }
     release();
     idleVideo();
@@ -274,12 +303,21 @@ public:
       return;
     if (!targetAvailable()) {
       std::lock_guard<std::mutex> lock(mutex);
+      captureInterrupted = true;
       for (auto &r : requests)
         snapshot(r);
       requests.clear();
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
+    if (captureInterrupted) {
+      // Keep earlier footage available until recovery produces a decodable
+      // keyframe. Never join the absent interval into a seemingly continuous clip.
+      if (p->type != OBS_ENCODER_VIDEO || !p->keyframe) return;
+      ring.clear();
+      bytes = 0;
+      captureInterrupted = false;
+    }
     ring.emplace_back(*p);
     bytes += p->size;
     // Purge only at keyframes, keeping the retained GOP independently
@@ -313,7 +351,13 @@ public:
     }
   }
   void snapshot(const Request &r) {
-    int64_t begin = r.end - int64_t(seconds) * 1000000;
+    int64_t end = r.end;
+    for (auto i = ring.rbegin(); i != ring.rend(); ++i)
+      if (i->p.type == OBS_ENCODER_VIDEO) {
+        end = std::min(end, i->p.sys_dts_usec);
+        break;
+      }
+    int64_t begin = end - int64_t(seconds) * 1000000;
     if (avoidOverlap)
       begin = std::max(begin, previousEnd);
     size_t start = ring.size();
@@ -331,9 +375,10 @@ public:
         }
     Job j;
     j.request = r;
+    j.secondsSinceCapture = std::max(0., double(r.end - end) / 1000000.);
     j.source = r.source;
     for (size_t i = start; i < ring.size(); i++)
-      if (ring[i].p.sys_dts_usec <= r.end)
+      if (ring[i].p.sys_dts_usec <= end)
         j.packets.emplace_back(ring[i]);
     if (j.packets.empty()) {
       pending--;
@@ -376,7 +421,7 @@ public:
     pending++;
     requests.push_back(r);
     emit({{"event", "saving"}, {"requestId", r.id}});
-    if (!targetAvailable()) {
+    if (!targetAvailable() || captureInterrupted) {
       snapshot(requests.back());
       requests.pop_back();
     }
@@ -411,7 +456,7 @@ public:
       }
       bool okay = false;
       std::string temp = j.request.path + ".saving.mkv";
-      auto *args = os_process_args_create("obs-ffmpeg-mux.exe");
+      auto *args = os_process_args_create(muxExecutable.c_str());
       auto add = [&](std::string v) {
         os_process_args_add_arg(args, v.c_str());
       };
@@ -469,12 +514,21 @@ public:
             throw std::runtime_error(
                 "A file already exists at the clip destination. The existing "
                 "file was preserved");
+#ifdef _WIN32
           std::filesystem::rename(temp, j.request.path);
+#else
+          // POSIX rename replaces an existing destination. Publishing a hard
+          // link fails atomically if another writer won the filename race.
+          std::filesystem::create_hard_link(temp, j.request.path);
+          std::filesystem::remove(temp);
+#endif
           std::lock_guard<std::mutex> lock(mutex);
           previousEnd = j.request.end;
           emit({{"event", "saved"},
                 {"requestId", j.request.id},
                 {"path", j.request.path},
+                {"previousFootage", j.secondsSinceCapture > 0.25},
+                {"secondsSinceCapture", j.secondsSinceCapture},
                 {"source", j.source}});
         } else {
           emit({{"event", "error"},
@@ -602,6 +656,38 @@ public:
       throw std::runtime_error(
           "Automatic game detection is not available in this recording backend "
           "yet. Choose Screen or App");
+#elif defined(__linux__)
+    if (kind != "screen")
+      throw std::runtime_error("Linux application capture is not available yet. Screen capture records the selected desktop and its audio");
+    if (!std::getenv("DISPLAY") || (std::getenv("WAYLAND_DISPLAY") && *std::getenv("WAYLAND_DISPLAY")) || (std::getenv("XDG_SESSION_TYPE") && std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland"))
+      throw std::runtime_error("Native Linux capture currently requires an X11 session. Wayland capture is unavailable");
+    int screen = c.value("screenIndex", 0);
+    obs_data_set_int(s, "screen", screen);
+    obs_data_set_bool(s, "show_cursor", true);
+    next = obs_source_create_private("xshm_input_v2", "Capture", s);
+    if (!next)
+      throw std::runtime_error("The X11 capture module could not create a source");
+    auto *props = obs_source_properties(next);
+    auto *screens = props ? obs_properties_get(props, "screen") : nullptr;
+    bool found = false;
+    if (screens) for (size_t i = 0; i < obs_property_list_item_count(screens); i++) {
+      if (obs_property_list_item_disabled(screens, i)) continue;
+      int candidate = int(obs_property_list_item_int(screens, i));
+      if (c.contains("bounds") && c["bounds"].is_object()) {
+        std::string label = obs_property_list_item_name(screens, i);
+        auto bracket = label.find('(');
+        int w = 0, h = 0, x = 0, y = 0;
+        if (bracket == std::string::npos || sscanf(label.c_str() + bracket, "(%dx%d @ %d,%d)", &w, &h, &x, &y) != 4) continue;
+        auto b = c["bounds"];
+        if (w != b.value("width", 0) || h != b.value("height", 0) || x != b.value("x", 0) || y != b.value("y", 0)) continue;
+      } else if (candidate != screen) continue;
+      obs_data_set_int(s, "screen", candidate);
+      found = true;
+      break;
+    }
+    obs_properties_destroy(props);
+    if (!found) { obs_source_release(next); obs_data_release(s); throw std::runtime_error("The selected X11 display could not be matched safely"); }
+    obs_source_update(next, s);
 #else
     throw std::runtime_error(
         "Native capture on this platform is not yet implemented");
@@ -675,7 +761,7 @@ public:
         throw std::runtime_error("The custom recording profile is invalid");
     }
     obs_video_info vi{};
-    vi.graphics_module = "libobs-d3d11.dll";
+    vi.graphics_module = graphicsModule();
     vi.fps_num = fps;
     vi.fps_den = 1;
     vi.base_width = width;
@@ -695,7 +781,7 @@ public:
     auto *d = obs_data_create();
     obs_data_set_string(d, "device_id", "default");
     desktop =
-        obs_source_create_private("wasapi_output_capture", "Capture audio", d);
+        obs_source_create_private(desktopType(), "Capture audio", d);
     obs_data_release(d);
     if (desktop) {
       obs_source_set_audio_mixers(desktop, 3);
@@ -703,7 +789,7 @@ public:
     }
     if (c.value("microphone", false)) {
       d = obs_data_create();
-      auto *props = obs_get_source_properties("wasapi_input_capture");
+      auto *props = obs_get_source_properties(microphoneType());
       auto *devices = obs_properties_get(props, "device_id");
       bool found = false;
       std::string requested =
@@ -720,7 +806,7 @@ public:
       obs_data_set_string(
           d, "device_id",
           c.value("microphoneDevice", std::string("default")).c_str());
-      mic = obs_source_create_private("wasapi_input_capture", "Microphone", d);
+      mic = obs_source_create_private(microphoneType(), "Microphone", d);
       obs_data_release(d);
       if (!mic)
         throw std::runtime_error("The microphone could not be opened");
@@ -753,6 +839,7 @@ public:
       if (std::string(id) == "obs_nvenc_h264_tex" ||
           std::string(id) == "obs_nvenc_h264")
         encoder = id;
+    if (std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE")) encoder.clear();
     if (encoder.empty() && c.value("allowSoftwareEncoder", false)) {
       for (size_t i = 0; obs_enum_encoder_types(i, &id); i++)
         if (std::string(id) == "obs_x264")
@@ -799,6 +886,9 @@ public:
 Recorder *recorder = nullptr;
 int main(int argc, char **argv) {
   try {
+#ifdef __linux__
+    if (!XInitThreads()) throw std::runtime_error("X11 thread initialization failed");
+#endif
     base_set_log_handler(logger, nullptr);
 #ifdef _WIN32
     SetProcessDPIAware();
@@ -819,9 +909,17 @@ int main(int argc, char **argv) {
     if (!obs_startup("en-US", config.u8string().c_str(), nullptr))
       throw std::runtime_error("libOBS initialization failed");
     std::filesystem::path root = argc > 1 ? argv[1] : ".";
+#ifdef __linux__
+    if (!std::getenv("DISPLAY")) throw std::runtime_error("An X11 display is required for native recording");
+    auto *display = XOpenDisplay(nullptr);
+    if (!display) throw std::runtime_error("The X11 display could not be opened");
+    obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
+    obs_set_nix_platform_display(display);
+    muxExecutable = (root / "obs-ffmpeg-mux").string();
+#endif
     obs_add_data_path(((root / "data/libobs").u8string() + "/").c_str());
     obs_video_info initial{};
-    initial.graphics_module = "libobs-d3d11.dll";
+    initial.graphics_module = graphicsModule();
     initial.fps_num = 30;
     initial.fps_den = 1;
     initial.base_width = 1920;
@@ -834,6 +932,7 @@ int main(int argc, char **argv) {
     initial.range = VIDEO_RANGE_PARTIAL;
     if (obs_reset_video(&initial) != OBS_VIDEO_SUCCESS)
       throw std::runtime_error("Graphics initialization failed");
+#ifdef _WIN32
     for (auto name :
          {"win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc", "obs-x264"}) {
       obs_module_t *module = nullptr;
@@ -843,6 +942,15 @@ int main(int argc, char **argv) {
                           data.u8string().c_str()) == MODULE_SUCCESS)
         obs_init_module(module);
     }
+#elif defined(__linux__)
+    for (auto name : {"linux-capture", "linux-pulseaudio", "obs-ffmpeg", "obs-nvenc", "obs-x264"}) {
+      if (std::string(name) == "obs-nvenc" && std::getenv("ATTACLIP_NATIVE_TEST_SOFTWARE")) continue;
+      obs_module_t *module = nullptr;
+      auto file = root / "obs-plugins" / (std::string(name) + ".so");
+      auto data = root / "data/obs-plugins" / name;
+      if (obs_open_module(&module, file.string().c_str(), data.string().c_str()) == MODULE_SUCCESS) obs_init_module(module);
+    }
+#endif
     obs_post_load_modules();
     obs_audio_info ai{};
     ai.samples_per_sec = 48000;
@@ -909,7 +1017,7 @@ int main(int argc, char **argv) {
             emit({{"event", "windows"}, {"windows", windows}});
 #endif
           } else if (action == "audio-devices") {
-            auto *props = obs_get_source_properties("wasapi_input_capture");
+            auto *props = obs_get_source_properties(microphoneType());
             auto *property = obs_properties_get(props, "device_id");
             json devices = json::array();
             for (size_t i = 0; i < obs_property_list_item_count(property); i++)
@@ -945,7 +1053,7 @@ int main(int argc, char **argv) {
             emit({{"event", "status"},
                   {"fullscreen", fullscreen},
                   {"active", r.active.load()},
-                  {"waiting", r.active && !r.targetAvailable()},
+                  {"waiting", r.active && (!r.targetAvailable() || r.captureInterrupted)},
                   {"availableSeconds", std::min(double(r.seconds), available)},
                   {"pendingSaves", r.pending.load()}});
           }

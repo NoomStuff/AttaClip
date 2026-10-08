@@ -10,7 +10,10 @@ concurrency:
    group: checks-${{ github.ref }}
    cancel-in-progress: true
 jobs:
+   controlled-media:
+      uses: ./.github/workflows/controlled-media.yml
    verify:
+      needs: controlled-media
       runs-on: windows-2025
       timeout-minutes: 25
       steps:
@@ -19,9 +22,16 @@ jobs:
            with:
               bun-version: "1.4.2"
          - run: bun install --frozen-lockfile
+         - uses: actions/download-artifact@v8
+           with:
+              name: controlled-windows-media
+              path: work/
+         - name: Verify and record the cross build on Windows
+           run: bun scripts/controlled-media.ts
          - run: bun scripts/provision-media.ts
          - run: bun run bundle:media
          - run: bun run build:icons
+         - run: bun run build:notices
          - run: bun run verify
          - run: bun run test:media
          - run: bun run test:ui

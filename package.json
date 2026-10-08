@@ -16,14 +16,17 @@
       "lint": "eslint . --max-warnings 0",
       "verify": "bun run format:check && bun run lint && bun run test && bun run build",
       "test:ui": "bun run build && playwright test",
+      "test:ui:native": "bun scripts/test-native-ui.ts",
       "test:media": "bun tests/media.ts",
       "test:packaged": "bun tests/packaged.ts",
       "test:native": "bun scripts/smoke-recorder.ts",
+      "test:capture-loss": "bun scripts/smoke-capture-loss.ts",
       "build:icons": "bun scripts/build-icons.ts",
+      "build:notices": "bun scripts/generate-notices.ts",
       "bundle:media": "bun scripts/bundle-media.ts",
       "build:native": "bun scripts/build-native.ts",
-      "dist": "bun run build:icons && bun run build && electron-builder",
-      "package": "bun run build:icons && bun run build && electron-builder --dir"
+      "dist": "bun run build:icons && bun run build:notices && bun run build && electron-builder",
+      "package": "bun run build:icons && bun run build:notices && bun run build && electron-builder --dir"
    },
    "build": {
       "appId": "dev.attaclip.app",
@@ -44,6 +47,10 @@
          {
             "from": "resources/recorder",
             "to": "recorder"
+         },
+         {
+            "from": "resources/notices",
+            "to": "notices"
          },
          {
             "from": "LICENSE",

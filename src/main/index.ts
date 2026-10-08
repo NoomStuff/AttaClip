@@ -33,6 +33,7 @@ let cachedSources: CaptureSource[] = [];
 let preferenceWrites: Promise<unknown> = Promise.resolve();
 let collectionReady: Promise<void> = Promise.resolve();
 let startingCapture: Promise<void> | null = null;
+let previewSourceId: string | null = null;
 const mediaFiles = new Map<string, string>();
 const mediaKeys = new Map<string, string>();
 const collections = new CollectionService({
@@ -58,10 +59,10 @@ const recorder = new Recorder({
       updateTray();
    },
    onError: (message) => notice(message, true),
-   onSaved: async (path, source) => {
+   onSaved: async (path, source, _requestId, capture) => {
       const clip = await collections.registerRecording(path, source);
       emitState();
-      notice("Clip saved");
+      notice(capture.previousFootage ? "Saved last available footage" : "Clip saved");
       if (preferences.autoShare) {
          void collections.createShareable(clip.id, preferences.shareSizeMB).catch((e) => notice(errorMessage(e), true));
       }
@@ -85,7 +86,9 @@ function state(): AppState {
    };
 }
 function send(event: AppEvent) {
-   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("app-event", event);
+   if (!mainWindow || mainWindow.isDestroyed()) return;
+   if (event.type !== "visibility" && (!mainWindow.isVisible() || mainWindow.isMinimized())) return;
+   mainWindow.webContents.send("app-event", event);
 }
 function emitState() {
    if (preferences) send({ type: "state", state: state() });
@@ -195,7 +198,12 @@ function createWindow() {
       webPreferences: { preload: join(here, "../preload/index.cjs"), sandbox: true, contextIsolation: true, nodeIntegration: false },
    });
    mainWindow.once("ready-to-show", () => mainWindow?.show());
-   const visibilityChanged = () => send({ type: "visibility", visible: !!mainWindow?.isVisible() && !mainWindow.isMinimized() });
+   const visibilityChanged = () => {
+      const visible = !!mainWindow?.isVisible() && !mainWindow.isMinimized();
+      if (!visible) previewSourceId = null;
+      send({ type: "visibility", visible });
+      if (visible) emitState();
+   };
    mainWindow.on("show", visibilityChanged);
    mainWindow.on("hide", visibilityChanged);
    mainWindow.on("minimize", visibilityChanged);
@@ -297,6 +305,7 @@ async function prepareExit(): Promise<boolean> {
    if (exiting) return exiting;
    closingRequested = true;
    exiting = (async () => {
+      await preferenceWrites.catch(() => undefined);
       await startingCapture?.catch(() => undefined);
       const saves = recorder.status.pendingSaves;
       if (saves || pendingJobs().length) {
@@ -351,8 +360,6 @@ async function prepareExit(): Promise<boolean> {
          }
          await recorder.close();
       }
-      quitting = true;
-      globalShortcut.unregisterAll();
       return true;
    })();
    try {
@@ -364,7 +371,11 @@ async function prepareExit(): Promise<boolean> {
 }
 async function requestExit() {
    try {
-      if (await prepareExit()) app.quit();
+      if (await prepareExit()) {
+         quitting = true;
+         globalShortcut.unregisterAll();
+         app.quit();
+      }
    } catch (error) {
       notice(`AttaClip could not finish exiting: ${errorMessage(error)}`, true);
    }
@@ -395,6 +406,19 @@ function handle(channel: string, fn: (...args: unknown[]) => unknown) {
 function registerIPC() {
    handle("state", () => state());
    handle("sources", () => sources());
+   handle("preview-source", (id) => {
+      const requested = z.string().max(200).nullable().parse(id);
+      if (requested === null) {
+         previewSourceId = null;
+         return;
+      }
+      if (!mainWindow?.isVisible() || mainWindow.isMinimized() || !preferences.setupComplete) throw new Error("Open Recording to preview the capture source.");
+      const selected =
+         cachedSources.find((source) => source.id === preferences.sourceId && source.kind === preferences.sourceKind) ??
+         (!preferences.sourceId && preferences.sourceKind === "screen" ? cachedSources.find((source) => source.kind === "screen") : undefined);
+      if (!selected || selected.id !== requested) throw new Error("The selected preview source is unavailable.");
+      previewSourceId = requested;
+   });
    handle("audio-devices", () => recorder.audioDevices());
    handle("choose-folder", async () => {
       const picked = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"], defaultPath: preferences.collection });
@@ -450,6 +474,7 @@ function registerIPC() {
                throw e;
             }
             if (next.shortcut !== preferences.shortcut) globalShortcut.unregister(preferences.shortcut);
+            if (next.sourceId !== preferences.sourceId || next.sourceKind !== preferences.sourceKind) previewSourceId = null;
             preferences = next;
             emitState();
             return state();
@@ -588,17 +613,42 @@ else {
          preferencePath = join(app.getPath("userData"), "preferences.json");
          preferences = await readPreferences(preferencePath, process.env["ATTACLIP_COLLECTION"] ?? join(app.getPath("videos"), "AttaClip"));
          collectionReady = collections.open(preferences.collection);
+         const previewAllowed = () => !!previewSourceId && !!mainWindow?.isVisible() && !mainWindow.isMinimized() && !closingRequested;
+         session.defaultSession.setDisplayMediaRequestHandler(
+            (request, callback) => {
+               if (request.frame !== mainWindow?.webContents.mainFrame || !request.videoRequested || request.audioRequested || !previewAllowed()) {
+                  callback(null);
+                  return;
+               }
+               const requested = previewSourceId;
+               const sourceKind = preferences.sourceKind;
+               const sourceId = preferences.sourceId;
+               void desktopCapturer
+                  .getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } })
+                  .then((available) => {
+                     if (!previewAllowed() || previewSourceId !== requested || preferences.sourceKind !== sourceKind || preferences.sourceId !== sourceId) {
+                        callback(null);
+                        return;
+                     }
+                     const selected = available.find((source) => source.id === requested);
+                     callback(selected ? { video: selected } : null);
+                  })
+                  .catch(() => callback(null));
+            },
+            { useSystemPicker: false }
+         );
          session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) =>
             callback(
                webContents === mainWindow?.webContents &&
-                  permission === "media" &&
-                  "mediaTypes" in details &&
-                  details.mediaTypes?.length === 1 &&
-                  details.mediaTypes[0] === "audio"
+                  ((permission === "display-capture" && previewAllowed()) ||
+                     (permission === "media" && details.isMainFrame && "mediaTypes" in details && details.mediaTypes?.length === 0 && previewAllowed()) ||
+                     (permission === "media" && "mediaTypes" in details && details.mediaTypes?.length === 1 && details.mediaTypes[0] === "audio"))
             )
          );
          session.defaultSession.setPermissionCheckHandler(
-            (webContents, permission, _origin, details) => webContents === mainWindow?.webContents && permission === "media" && details.mediaType === "audio"
+            (webContents, permission, _origin, details) =>
+               webContents === mainWindow?.webContents &&
+               ((permission === "display-capture" && details.isMainFrame && previewAllowed()) || (permission === "media" && details.mediaType === "audio"))
          );
          protocol.handle("attaclip-media", async (request) => {
             const url = new URL(request.url);

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { AppWindow, AudioLines, Clapperboard, Circle, CircleStop, Mic, MicOff, Monitor, RefreshCw, Volume2, VolumeX, WandSparkles } from "lucide-react";
 import type { AppState, CaptureSource, Preferences, SourceKind } from "../../shared/types";
-import { api, Empty, IconButton, LevelSlider, Segmented, Toggle } from "./ui";
+import { api, Button, Empty, IconButton, LevelSlider, Segmented, Toggle } from "./ui";
 import type { Run } from "./ui";
+import { useSourcePreview } from "./useSourcePreview";
 
 export function Recording({ state, visible, run, pulse }: { state: AppState; visible: boolean; run: Run; pulse: number }) {
    const [sources, setSources] = useState<CaptureSource[]>([]);
@@ -32,6 +33,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          ? undefined
          : (sources.find((item) => item.id === state.preferences.sourceId) ??
            (!state.preferences.sourceId && state.preferences.sourceKind === "screen" ? sources.find((item) => item.kind === "screen") : undefined));
+   const preview = useSourcePreview(source?.id, visible && state.preferences.setupComplete);
    const refresh = async () => {
       setLoading(true);
       await run(async () => setSources(await api.sources()));
@@ -55,7 +57,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
       void fetch();
       const timer = window.setInterval(() => {
          if (!document.hidden) void fetch();
-      }, 2500);
+      }, 10000);
       return () => {
          gone = true;
          window.clearInterval(timer);
@@ -163,8 +165,37 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          <div className="recording-layout">
             <div className="recording-main">
                <div className="preview-surface">
-                  {source?.thumbnail ? (
-                     <img src={source.thumbnail} alt={`Preview of ${source.name}`} className="source-preview" />
+                  {source ? (
+                     <>
+                        <video
+                           ref={preview.video}
+                           muted
+                           autoPlay
+                           playsInline
+                           aria-label={`Live preview of ${source.name}`}
+                           className={`source-preview preview-stream ${preview.status === "live" ? "ready" : ""}`}
+                        />
+                        {preview.status !== "live" && (
+                           <div className="preview-message">
+                              {preview.status === "error" ? (
+                                 <>
+                                    <Monitor size={30} />
+                                    <h3>Preview unavailable</h3>
+                                    <p>{preview.error}</p>
+                                    <Button onClick={preview.retry}>
+                                       <RefreshCw size={14} />
+                                       Retry preview
+                                    </Button>
+                                 </>
+                              ) : (
+                                 <>
+                                    <Monitor size={30} />
+                                    <p>Opening preview…</p>
+                                 </>
+                              )}
+                           </div>
+                        )}
+                     </>
                   ) : (
                      <Empty
                         icon={<Monitor size={38} />}
@@ -176,11 +207,11 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                         }
                      />
                   )}
-                  {source?.thumbnail && (
+                  {source && (
                      <div className="preview-caption">
-                        <span className={active ? "preview-dot active" : "preview-dot"} />
+                        <span className={preview.status === "live" ? "preview-dot live" : "preview-dot"} />
                         {source.name}
-                        <span className="preview-note">Source preview</span>
+                        <span className="preview-note">{preview.status === "live" ? "Live preview" : "Preview"}</span>
                      </div>
                   )}
                </div>

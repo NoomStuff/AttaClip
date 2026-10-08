@@ -9,7 +9,7 @@ import type { CaptureSource, Preferences, RecorderState } from "../shared/types"
 interface RecorderOptions {
    nativePath?: string;
    onState: (state: RecorderState) => void;
-   onSaved: (file: string, source: string, requestId: string) => void | Promise<void>;
+   onSaved: (file: string, source: string, requestId: string, capture: { previousFootage: boolean; secondsSinceCapture: number }) => void | Promise<void>;
    onError: (message: string) => void;
    onAudioLevels?: (levels: { capture: number; microphone: number }) => void;
 }
@@ -30,6 +30,8 @@ interface NativeMessage {
    devices?: Array<{ id: string; name: string }>;
    capture?: number;
    microphone?: number;
+   previousFootage?: boolean;
+   secondsSinceCapture?: number;
 }
 
 export class Recorder {
@@ -50,8 +52,8 @@ export class Recorder {
    constructor(options: RecorderOptions) {
       this.options = options;
       this.current.supported =
-         process.platform === "win32" &&
-         (existsSync(this.executable) || (!options.nativePath && existsSync(path.join(process.cwd(), "resources", "recorder", "attaclip-recorder.exe"))));
+         (process.platform === "win32" || process.platform === "linux") &&
+         (existsSync(this.executable) || (!options.nativePath && existsSync(this.developmentExecutable)));
       if (!this.current.supported) this.current.message = "The native recorder is not available in this build";
    }
    private get executable(): string {
@@ -60,6 +62,9 @@ export class Recorder {
          this.options.nativePath ??
          path.join(resources ?? process.cwd(), "recorder", process.platform === "win32" ? "attaclip-recorder.exe" : "attaclip-recorder")
       );
+   }
+   private get developmentExecutable(): string {
+      return path.join(process.cwd(), "resources", "recorder", process.platform === "win32" ? "attaclip-recorder.exe" : "attaclip-recorder");
    }
    get status(): RecorderState {
       return { ...this.current };
@@ -115,14 +120,23 @@ export class Recorder {
       if (this.ready) return this.ready;
       let executable = this.executable;
       // Unpackaged development uses the same staged runtime as packaged builds.
-      if (!existsSync(executable) && !this.options.nativePath) executable = path.join(process.cwd(), "resources", "recorder", "attaclip-recorder.exe");
-      if (process.platform !== "win32" || !existsSync(executable)) throw new Error("Native recording is not available on this platform yet");
+      if (!existsSync(executable) && !this.options.nativePath) executable = this.developmentExecutable;
+      if ((process.platform !== "win32" && process.platform !== "linux") || !existsSync(executable))
+         throw new Error("Native recording is not available on this platform yet");
       this.ready = new Promise<void>((resolve, reject) => {
          this.readyResolve = resolve;
          this.readyReject = reject;
       });
       const root = path.dirname(executable);
-      this.process = spawn(executable, [root], { cwd: root, windowsHide: true, stdio: "pipe" });
+      this.process = spawn(executable, [root], {
+         cwd: root,
+         windowsHide: true,
+         stdio: "pipe",
+         env: {
+            ...process.env,
+            ...(process.platform === "linux" ? { LD_LIBRARY_PATH: [path.join(root, "lib"), process.env["LD_LIBRARY_PATH"]].filter(Boolean).join(":") } : {}),
+         },
+      });
       this.process.stdin.on("error", (error: Error) => {
          this.readyReject?.(error);
          for (const command of this.commands.values()) {
@@ -218,7 +232,12 @@ export class Recorder {
          });
       }
       if (value.event === "saved" && value.path) {
-         Promise.resolve(this.options.onSaved(value.path, value.source ?? this.source, value.requestId ?? ""))
+         Promise.resolve(
+            this.options.onSaved(value.path, value.source ?? this.source, value.requestId ?? "", {
+               previousFootage: value.previousFootage ?? false,
+               secondsSinceCapture: value.secondsSinceCapture ?? 0,
+            })
+         )
             .catch((error: unknown) => this.error(error instanceof Error ? error.message : "The saved clip could not be added to the library"))
             .finally(() => {
                if (value.requestId) this.requests.delete(value.requestId);

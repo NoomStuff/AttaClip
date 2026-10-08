@@ -185,7 +185,7 @@ export function Library({
                )}
             </div>
             <div className="sidebar-bottom">
-               {state.clips.length} clips · {formatSize(state.clips.reduce((sum, item) => sum + item.size, 0))}
+               {state.clips.length} {state.clips.length === 1 ? "clip" : "clips"} · {formatSize(state.clips.reduce((sum, item) => sum + item.size, 0))}
             </div>
          </aside>
          <div className="library-content">

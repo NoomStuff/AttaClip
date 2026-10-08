@@ -3,8 +3,20 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, appendFile, readdir, chmod } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { mediaArchives } from "./media-lock.ts";
+import { readControlledBuild } from "./controlled-media.ts";
 
 export async function provisionMedia(): Promise<{ FFMPEG_PATH: string; FFPROBE_PATH: string }> {
+   if (process.platform === "win32") {
+      if (process.arch !== "x64") throw new Error("Controlled Windows media supports x64 only.");
+      const directory = resolve(process.env["ATTACLIP_CONTROLLED_MEDIA"] || "work/controlled-media/windows-x64");
+      await readControlledBuild(directory);
+      const paths = { FFMPEG_PATH: join(directory, "ffmpeg.exe"), FFPROBE_PATH: join(directory, "ffprobe.exe") };
+      for (const [variable, file] of Object.entries(paths)) {
+         if (process.env["GITHUB_ENV"]) await appendFile(process.env["GITHUB_ENV"], `${variable}=${file}\n`);
+         console.log(`${variable}=${file}`);
+      }
+      return paths;
+   }
    const archives = mediaArchives[`${process.platform}-${process.arch}`];
    if (!archives) throw new Error("No pinned media build for this platform.");
    await mkdir("work", { recursive: true });
@@ -14,7 +26,7 @@ export async function provisionMedia(): Promise<{ FFMPEG_PATH: string; FFPROBE_P
       // curl retries on every error (--retry alone skips mid-transfer protocol
       // failures like flaky HTTP/2 hosts); the checksum below catches bad data.
       execFileSync(
-         process.platform === "win32" ? "curl.exe" : "curl",
+         "curl",
          [
             "--fail",
             "--location",
@@ -42,11 +54,11 @@ export async function provisionMedia(): Promise<{ FFMPEG_PATH: string; FFPROBE_P
    const files = await readdir(folder, { recursive: true });
    const paths = {} as { FFMPEG_PATH: string; FFPROBE_PATH: string };
    for (const name of ["ffmpeg", "ffprobe"] as const) {
-      const filename = `${name}${process.platform === "win32" ? ".exe" : ""}`;
+      const filename = name;
       const match = files.find((path) => basename(path) === filename && !path.includes("__MACOSX"));
       if (!match) throw new Error(`${filename} is missing from the pinned archives.`);
       const path = join(folder, match);
-      if (process.platform !== "win32") await chmod(path, 0o755);
+      await chmod(path, 0o755);
       execFileSync(path, ["-version"], { stdio: "ignore" });
       const variable = name === "ffmpeg" ? "FFMPEG_PATH" : "FFPROBE_PATH";
       paths[variable] = path;

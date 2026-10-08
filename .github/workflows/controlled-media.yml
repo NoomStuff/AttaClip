@@ -1,0 +1,34 @@
+name: Controlled Windows media
+on:
+   workflow_call:
+permissions:
+   contents: read
+jobs:
+   build:
+      runs-on: ubuntu-24.04
+      timeout-minutes: 60
+      steps:
+         - uses: actions/checkout@v7
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.4.2"
+         - name: Install cross compiler
+           run: |
+              sudo apt-get update
+              sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 make nasm meson ninja-build pkg-config
+         - name: Collect immutable media inputs
+           run: bun scripts/release-sources.ts --controlled-inputs --collect-only
+         - name: Compile Windows media
+           run: bash scripts/build-media-windows.sh
+         - name: Share binaries and captured inputs with Windows verification
+           uses: actions/upload-artifact@v7
+           with:
+              name: controlled-windows-media
+              path: |
+                 work/controlled-media/windows-x64/
+                 work/release-sources/manifest.json
+                 work/release-sources/*.tar.gz
+                 work/release-sources/dependencies/*.tar.gz
+                 work/release-sources/licenses/
+              if-no-files-found: error
+              retention-days: 3

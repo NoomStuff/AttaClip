@@ -3,6 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import type { ControlledMediaBuild } from "./controlled-media";
 
 interface SourcePin {
    name: string;
@@ -59,6 +60,7 @@ export interface SourceKit {
    staged: HashedFile[];
    sources: SourceArchive[];
    blockers: string[];
+   collectionBlockers?: string[];
    requiredEvidence?: string[];
    evidence?: DependencyEvidence;
    dependencyRecipeRefs?: DependencyRecipeRef[];
@@ -77,6 +79,8 @@ export const sourcePins: SourcePin[] = [
    { name: "btbn-build-recipes", repository: "BtbN/FFmpeg-Builds", commit: "6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b" },
    { name: "ffmpeg-btbn-core", repository: "FFmpeg/FFmpeg", commit: "29e619e767cde9045a75c29bc9a8278ae7b3a98b" },
    { name: "json", repository: "nlohmann/json", commit: "55f93686c01528224f448c19128836e7df245f72" },
+   // Gitlink from the MbedTLS source used by OBS's SRT dependency.
+   { name: "obs-mbedtls-framework", repository: "Mbed-TLS/mbedtls-framework", commit: "2a3e2c5ea053c14b745dbdf41f609b1edc6a72fa" },
 ];
 
 export async function hashFile(file: string): Promise<string> {
@@ -278,7 +282,13 @@ async function exportRepository(ref: DependencyRecipeRef, file: string, director
       const names = (await runAsync("git", ["-C", git, "ls-tree", "--name-only", commit])).trim().split(/\r?\n/);
       subset.push(...names.filter((name) => /^licen[cs]e|^copying/i.test(name)));
    }
-   await runAsync("git", ["-C", git, "archive", "--format=tar.gz", `--prefix=source-${commit}/`, `--output=${file}`, commit, ...subset], 180_000);
+   // Match the captured Windows Git export on other build hosts too. Git archive
+   // applies text conversion, so leaving autocrlf implicit changes input hashes.
+   await runAsync(
+      "git",
+      ["-c", "core.autocrlf=true", "-C", git, "archive", "--format=tar.gz", `--prefix=source-${commit}/`, `--output=${file}`, commit, ...subset],
+      180_000
+   );
    return commit;
 }
 
@@ -427,11 +437,45 @@ async function collectDependencies(kit: SourceKit, directory: string, project: s
    await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify(kit, null, 2)}\n`);
 }
 
+async function collectControlledInputs(kit: SourceKit, directory: string): Promise<void> {
+   const inputs = [
+      {
+         origin: "https://code.videolan.org/videolan/x264.git",
+         commit: "0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee",
+         sha256: "d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50",
+      },
+      {
+         origin: "https://code.videolan.org/videolan/dav1d.git",
+         commit: "9711965b60bb692ae24004659acf61f5c7d9ed61",
+         sha256: "8c243fbc9d12019ee86785362db620c8bf66440778bd2232de0c4e9a4a54b6f0",
+      },
+      {
+         origin: "https://github.com/madler/zlib.git",
+         commit: "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+         sha256: "d9e270d46252734aa49770fbc544125391617956266f220bd63216c834f3a522",
+      },
+   ];
+   kit.dependencySources ??= [];
+   for (const input of inputs) {
+      let source = kit.dependencySources.find((item) => item.origin === input.origin && item.resolvedRevision === input.commit);
+      if (!source) {
+         const ref = kit.dependencyRecipeRefs?.find((item) => item.uri === input.origin && item.revision === input.commit);
+         if (!ref) throw new Error(`Controlled input is absent from pinned recipes: ${input.origin}`);
+         source = await collectDependency(ref, kit, directory);
+         kit.dependencySources.push(source);
+      }
+      if (source.sha256 !== input.sha256 || (await hashFile(path.join(directory, source.path))) !== input.sha256)
+         throw new Error(`Controlled source checksum changed: ${input.origin}`);
+   }
+   await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify(kit, null, 2)}\n`);
+}
+
 export async function validateKit(kit: SourceKit, kitDirectory: string, project: string): Promise<string[]> {
-   const blockers = [...kit.blockers];
+   const blockers = [...(kit.collectionBlockers ?? kit.blockers)];
    const current = [
       ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
       ...(await inventory(path.join(project, "resources", "media"), "media")),
+      ...(await inventory(path.join(project, "resources", "notices"), "notices")),
    ];
    if (JSON.stringify(current) !== JSON.stringify(kit.staged)) blockers.push("Staged files changed after collecting this source kit. Collect a new manifest.");
    for (const source of kit.sources) {
@@ -492,6 +536,7 @@ export async function collectKit(project: string, destination: string, downloadS
    const staged = [
       ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
       ...(await inventory(path.join(project, "resources", "media"), "media")),
+      ...(await inventory(path.join(project, "resources", "notices"), "notices")),
    ];
    const sources: SourceArchive[] = [];
    const blockers: string[] = [];
@@ -515,6 +560,36 @@ export async function collectKit(project: string, destination: string, downloadS
    if (!staged.some((file) => file.path === "media/ffmpeg.exe" || file.path === "media/ffmpeg")) blockers.push("No staged FFmpeg binary.");
    const mediaProvenancePath = path.join(project, "resources", "media", "provenance.json");
    const mediaProvenance = existsSync(mediaProvenancePath) ? await readFile(mediaProvenancePath, "utf8") : "";
+   let controlledBuild: ControlledMediaBuild | undefined;
+   try {
+      controlledBuild = (JSON.parse(mediaProvenance) as { controlledBuild?: ControlledMediaBuild }).controlledBuild;
+   } catch {
+      blockers.push("Media provenance is invalid.");
+   }
+   if (controlledBuild) {
+      if (
+         controlledBuild.producer !== "attaclip-controlled-windows" ||
+         controlledBuild.sourceCommits.ffmpeg !== sourcePins.find((pin) => pin.name === "ffmpeg-btbn-core")?.commit
+      )
+         blockers.push("Controlled FFmpeg source identity is not recognized.");
+      for (const name of ["ffmpeg", "ffprobe"] as const) {
+         const binary = staged.find((file) => file.path === `media/${name}.exe`);
+         if (!binary || binary.sha256 !== controlledBuild.binaries[name].sha256) blockers.push(`Controlled ${name} hash does not match staging.`);
+      }
+      for (const file of controlledBuild.evidenceFiles) {
+         const absolute = path.resolve(project, "resources", "media", "controlled-build", file.path);
+         if (!absolute.startsWith(`${path.resolve(project, "resources", "media", "controlled-build")}${path.sep}`))
+            throw new Error("Controlled build path escapes staging.");
+         if (!existsSync(absolute) || (await hashFile(absolute)) !== file.sha256)
+            blockers.push(`Controlled build evidence is missing or changed: ${file.path}`);
+      }
+      for (const file of controlledBuild.sourceArchives) {
+         const absolute = path.resolve(destination, file.path);
+         if (!absolute.startsWith(`${path.resolve(destination)}${path.sep}`)) throw new Error("Controlled source path escapes the kit.");
+         if (!existsSync(absolute) || (await hashFile(absolute)) !== file.sha256)
+            blockers.push(`Controlled source archive is missing or changed: ${file.path}`);
+      }
+   }
    if (!mediaProvenance.includes("29e619e767"))
       blockers.push("Staged FFmpeg does not identify the pinned BtbN core commit. Local Gyan or other binaries need their own source records.");
    const obsArchive = path.join(project, ".cache", "OBS-Studio-32.2.2-Windows-x64.zip");
@@ -563,7 +638,22 @@ export async function collectKit(project: string, destination: string, downloadS
    // The static FFmpeg executable contains these enabled external libraries.
    // Record each separately rather than assuming the core source covers them.
    requiredEvidence.push("ffmpeg-core-build-config");
-   const internalOrSystem = new Set(["gpl", "version3", "shared", "static", "debug", "pthreads", "w32threads", "schannel", "vaapi", "cuda-llvm"]);
+   const internalOrSystem = new Set([
+      "gpl",
+      "version3",
+      "shared",
+      "static",
+      "debug",
+      "pthreads",
+      "w32threads",
+      "schannel",
+      "vaapi",
+      "cuda-llvm",
+      "cross-compile",
+      "indev",
+      "encoder",
+      "protocol",
+   ]);
    for (const flag of new Set(mediaProvenance.match(/--enable-[\w-]+/g) ?? [])) {
       const name = flag.substring("--enable-".length);
       if (!internalOrSystem.has(name)) requiredEvidence.push(`ffmpeg-external:${name}`);
@@ -584,6 +674,7 @@ export async function collectKit(project: string, destination: string, downloadS
       staged,
       sources,
       blockers,
+      collectionBlockers: [...blockers],
       requiredEvidence,
       ...(evidence ? { evidence } : {}),
       dependencyRecipeRefs: sources
@@ -615,6 +706,7 @@ if (import.meta.main) {
    } else kit = await collectKit(project, destination, !process.argv.includes("--inventory-only"));
    if (!check && (process.argv.includes("--dependencies") || process.argv.includes("--retry-dependencies")))
       await collectDependencies(kit, destination, project, process.argv.includes("--retry-dependencies"));
+   if (!check && process.argv.includes("--controlled-inputs")) await collectControlledInputs(kit, destination);
    console.log(`Source kit: ${destination}\n${kit.staged.length} staged files, ${kit.sources.length} source archives.`);
    for (const blocker of kit.blockers) console.error(`Blocked: ${blocker}`);
    // This flag only controls archival job exit status. Publication still needs

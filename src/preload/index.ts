@@ -3,6 +3,7 @@ import type { AppEvent, DesktopAPI } from "../shared/types";
 const api: DesktopAPI = {
    state: () => ipcRenderer.invoke("state"),
    sources: () => ipcRenderer.invoke("sources"),
+   previewSource: (sourceId) => ipcRenderer.invoke("preview-source", sourceId),
    audioDevices: () => ipcRenderer.invoke("audio-devices"),
    savePreferences: (value) => ipcRenderer.invoke("preferences", value),
    chooseFolder: () => ipcRenderer.invoke("choose-folder"),

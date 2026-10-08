@@ -21,6 +21,10 @@ async function download(url: string, target: string): Promise<void> {
    if (!response.ok) throw new Error(`Download failed: ${response.status} ${url}`);
    await writeFile(target, Buffer.from(await response.arrayBuffer()));
 }
+if (process.platform === "linux") {
+   await import("./build-native-linux");
+   process.exit(0);
+}
 if (process.platform !== "win32") {
    await mkdir(runtime, { recursive: true });
    await writeFile(

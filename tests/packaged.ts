@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { defaultPreferences } from "../src/shared/defaults";
 
@@ -13,6 +13,7 @@ import { defaultPreferences } from "../src/shared/defaults";
 if (process.platform !== "win32") throw new Error("Packaged capture verification requires Windows");
 const profile = await mkdtemp(join(tmpdir(), "attaclip-packaged-"));
 const collection = join(profile, "clips");
+const executable = resolve(process.env["ATTACLIP_PACKAGED_EXE"] ?? "release/win-unpacked/AttaClip.exe");
 await mkdir(collection);
 await writeFile(
    join(profile, "preferences.json"),
@@ -28,7 +29,7 @@ await writeFile(
    })
 );
 const application = await electron.launch({
-   executablePath: resolve("release/win-unpacked/AttaClip.exe"),
+   executablePath: executable,
    args: ["--disable-gpu-sandbox"],
    env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
 });
@@ -80,7 +81,7 @@ try {
    assert(clip.tracks.length >= 2, "Master and capture audio must exist");
    const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
    const originalHash = hash(await readFile(clip.path));
-   const ffmpeg = resolve("release/win-unpacked/resources/media/ffmpeg.exe");
+   const ffmpeg = join(dirname(executable), "resources/media/ffmpeg.exe");
    for (const saved of state.clips) await promisify(execFile)(ffmpeg, ["-v", "error", "-i", saved.path, "-f", "null", "-"], { windowsHide: true });
    await page.evaluate((id) => window.attaClip.createShareable(id, 1), clip.id);
    await expect

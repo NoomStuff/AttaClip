@@ -460,6 +460,42 @@ svg {
    height: 100%;
    object-fit: contain;
 }
+.preview-stream {
+   opacity: 0;
+   transition: opacity 180ms var(--ease);
+}
+.preview-stream.ready {
+   opacity: 1;
+}
+.preview-message {
+   position: absolute;
+   inset: 0;
+   display: flex;
+   flex-direction: column;
+   align-items: center;
+   justify-content: center;
+   gap: 13px;
+   padding: 25px;
+   color: var(--muted);
+   text-align: center;
+}
+.preview-message h3,
+.preview-message p {
+   margin: 0;
+}
+.preview-message h3 {
+   color: #ded7e7;
+   font-size: 15px;
+   font-weight: 500;
+}
+.preview-message p {
+   max-width: 340px;
+   font-size: 12px;
+   line-height: 1.6;
+}
+.preview-dot.live {
+   background: var(--green);
+}
 .preview-caption {
    position: absolute;
    display: flex;

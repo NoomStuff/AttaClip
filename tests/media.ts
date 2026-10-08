@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm, stat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm, stat, symlink, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CollectionService, fileIdentity } from "../src/main/collection";
+import { CollectionService, fileIdentity, withinRoot } from "../src/main/collection";
 import { ffmpegBase, probe, runMedia } from "../src/main/media";
 
-const workspace = await mkdtemp(join(tmpdir(), "attaclip-media-"));
+const workspace = await realpath(await mkdtemp(join(tmpdir(), "attaclip-media-")));
 const root = join(workspace, "collection");
 const external = join(workspace, "external");
 await mkdir(join(root, "Existing game"), { recursive: true });
@@ -179,6 +179,6 @@ try {
       "Media verification passed: real multi-track video, full-duration size-target export, playback decode, categories, cancellation, folder conflicts, relative moves, metadata recovery, and deletion boundaries."
    );
 } finally {
-   assert.ok(workspace.startsWith(tmpdir()), "test cleanup stays within isolated temporary workspace");
+   assert.ok(withinRoot(await realpath(tmpdir()), workspace), "test cleanup stays within isolated temporary workspace");
    await rm(workspace, { recursive: true, force: true });
 }
