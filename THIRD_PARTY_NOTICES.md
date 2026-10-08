@@ -1,6 +1,6 @@
 # Third-party notices
 
-AttaClip is distributed under GPL-3.0-or-later. Reused MIT code retains its original license. See LICENSE and LICENSE-AttaCut.
+AttaClip is distributed under GPL-3.0-or-later. Reused MIT code retains its original license. See LICENSE and licenses/AttaCut-MIT.txt.
 
 ## AttaCut
 

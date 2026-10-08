@@ -67,7 +67,7 @@
          },
          {
             "to": "LICENSE-AttaCut",
-            "from": "LICENSE-AttaCut"
+            "from": "licenses/AttaCut-MIT.txt"
          }
       ],
       "win": {
