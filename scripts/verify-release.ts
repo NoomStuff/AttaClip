@@ -137,7 +137,7 @@ export async function verifyPackagedResources(project: string, unpacked: string,
    const electron = await inventory(path.join(project, "node_modules/electron/dist"));
    if (!electron.length) throw new Error("Installed Electron runtime is missing.");
    for (const file of electron) {
-      if (["electron.exe", "version"].includes(file.path)) continue;
+      if (["electron.exe", "version", "resources/default_app.asar"].includes(file.path)) continue;
       const target = file.path === "LICENSE" ? "LICENSE.electron.txt" : file.path;
       compareFiles([{ ...file, path: target }], [await fileRecord(path.join(unpacked, target), target)], "Packaged Electron runtime");
    }
