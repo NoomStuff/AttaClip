@@ -24,6 +24,8 @@ const commit = "ba2f32bdf791005443988a4955e963663e16b1ed";
 const root = process.cwd();
 const folder = path.join(root, ".cache/macos-probe");
 const source = path.join(folder, "obs-source");
+const simde = path.join(folder, "simde-source");
+const simdeCommit = "71fd833d9666141edcd1d3c109a80e228303d8d7";
 const mount = path.join(folder, "mounted-obs");
 const build = path.join(folder, "build");
 const run = (command: string, args: string[]) => {
@@ -35,6 +37,13 @@ await mkdir(folder, { recursive: true });
 if (!existsSync(path.join(source, "libobs/obs.h")))
    run("git", ["clone", "--depth", "1", "--branch", "32.2.2", "https://github.com/obsproject/obs-studio.git", source]);
 if (run("git", ["-C", source, "rev-parse", "HEAD"]).trim() !== commit) throw new Error("OBS headers differ from the pinned source commit.");
+// These header-only SIMD adapters match OBS's pinned macOS dependency recipe.
+if (!existsSync(path.join(simde, "simde/x86/sse2.h"))) {
+   run("git", ["init", simde]);
+   run("git", ["-C", simde, "fetch", "--depth", "1", "https://github.com/simd-everywhere/simde.git", simdeCommit]);
+   run("git", ["-C", simde, "checkout", "--detach", "FETCH_HEAD"]);
+}
+if (run("git", ["-C", simde, "rev-parse", "HEAD"]).trim() !== simdeCommit) throw new Error("SIMDe headers differ from the pinned OBS dependency.");
 const archive = path.join(folder, pin.name);
 if (!existsSync(archive)) {
    const response = await fetch(`https://github.com/obsproject/obs-studio/releases/download/32.2.2/${pin.name}`, { signal: AbortSignal.timeout(120000) });
@@ -49,13 +58,22 @@ await mkdir(mount, { recursive: true });
 run("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mount, archive]);
 try {
    const app = path.join(mount, "OBS.app");
-   run("cmake", ["-S", path.join(root, "native/macos-probe"), "-B", build, `-DOBS_APP=${app}`, `-DOBS_SOURCE_DIR=${source}`, "-DCMAKE_BUILD_TYPE=Release"]);
+   run("cmake", [
+      "-S",
+      path.join(root, "native/macos-probe"),
+      "-B",
+      build,
+      `-DOBS_APP=${app}`,
+      `-DOBS_SOURCE_DIR=${source}`,
+      `-DSIMDE_SOURCE_DIR=${simde}`,
+      "-DCMAKE_BUILD_TYPE=Release",
+   ]);
    run("cmake", ["--build", build, "--parallel", "2"]);
    await mkdir(path.join(folder, "config"), { recursive: true });
    const report = JSON.parse(run(path.join(build, "attaclip-macos-probe"), [app, path.join(folder, "config")])) as Record<string, unknown>;
    await writeFile(
       path.join(folder, "module-proof.json"),
-      `${JSON.stringify({ ...report, platform: `${process.platform}-${process.arch}`, runtimeArchive: pin, sourceCommit: commit }, null, 2)}\n`
+      `${JSON.stringify({ ...report, platform: `${process.platform}-${process.arch}`, runtimeArchive: pin, sourceCommit: commit, simdeCommit }, null, 2)}\n`
    );
    await writeFile(path.join(folder, "link-proof.txt"), run("otool", ["-L", path.join(build, "attaclip-macos-probe")]));
    console.log("Actual Mac module probe passed. Capture, microphone audio and permissions were not tested. Production recording remains unavailable.");
