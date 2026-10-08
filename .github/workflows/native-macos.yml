@@ -22,10 +22,10 @@ jobs:
            with:
               bun-version: "1.4.2"
          - run: bun install --frozen-lockfile
+         - name: Provision verified media tools
+           run: bun scripts/provision-media.ts
          - name: Stage verified media tools
-           run: |
-              bun scripts/provision-media.ts
-              bun run bundle:media
+           run: bun run bundle:media
          - name: Build and stage matching macOS recorder
            run: bun scripts/build-recorder-macos.ts
          - name: Verify actual screen and window recording with generated audio
