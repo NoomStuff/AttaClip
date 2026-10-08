@@ -4,9 +4,24 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe, it, expect } from "vitest";
-import { hashFile, hashTarContents, inventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
+import { hashFile, hashTarContents, inventory, releaseInventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
 
 describe("release source evidence", () => {
+   it("includes Electron's shared FFmpeg module in the release digest", async () => {
+      const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-electron-source-"));
+      try {
+         const directory = path.join(folder, "node_modules/electron/dist");
+         await mkdir(directory, { recursive: true });
+         const binary = path.join(directory, "ffmpeg.dll");
+         await writeFile(binary, "first build");
+         const first = await releaseInventory(folder);
+         expect(first).toEqual([{ path: "electron/ffmpeg.dll", sha256: await hashFile(binary), size: 11 }]);
+         await writeFile(binary, "second build");
+         expect(await releaseInventory(folder)).not.toEqual(first);
+      } finally {
+         await rm(folder, { recursive: true, force: true });
+      }
+   });
    it("pins source contents across gzip encoders and rejects damaged archives", async () => {
       const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-source-content-"));
       try {

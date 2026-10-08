@@ -58,7 +58,7 @@ Low, Standard, High, and Custom profiles expose the actual resolution and frame 
 
 Originals currently use MKV for recoverable saving. Compatible MP4 playback copies are made on demand, without replacing the original. Shareables use H.264 video and the master audio mix in MP4. Their completed size and duration are checked before publication. A too-small budget produces an error rather than a truncated clip.
 
-Shareable encoding is bounded, below-normal-priority software encoding. It is still extra work while recording. Windows NVENC and Linux software recording have passed actual media checks. Native fullscreen popup behavior, HDR, microphone amplitude, application-audio compatibility, and gameplay impact still need measurements. A successful installer build alone does not validate capture.
+Shareable encoding is bounded, below-normal-priority software encoding. It is still extra work while recording. Windows NVENC and Linux software recording have passed actual media checks. Physical microphone gain/mute and selected-application audio passed real tone checks on the development machine. Native fullscreen popup behavior, HDR, device hotplug, application-audio compatibility on other machines, and loaded-game impact still need verification. A successful installer build alone does not validate capture.
 
 ## Builds and releases
 

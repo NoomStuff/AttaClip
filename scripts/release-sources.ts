@@ -109,6 +109,17 @@ export async function inventory(directory: string, prefix = ""): Promise<HashedF
    return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+export async function releaseInventory(project: string): Promise<HashedFile[]> {
+   const files = [
+      ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
+      ...(await inventory(path.join(project, "resources", "media"), "media")),
+      ...(await inventory(path.join(project, "resources", "notices"), "notices")),
+   ];
+   const electronFfmpeg = path.join(project, "node_modules/electron/dist/ffmpeg.dll");
+   if (existsSync(electronFfmpeg)) files.push({ path: "electron/ffmpeg.dll", sha256: await hashFile(electronFfmpeg), size: (await stat(electronFfmpeg)).size });
+   return files;
+}
+
 function run(command: string, args: string[], cwd?: string): string {
    const result = spawnSync(command, args, { ...(cwd ? { cwd } : {}), encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
    if (result.status !== 0) throw new Error(`${command} failed: ${result.stderr || result.stdout}`);
@@ -517,11 +528,7 @@ export async function collectControlledInputs(kit: SourceKit, directory: string)
 
 export async function validateKit(kit: SourceKit, kitDirectory: string, project: string): Promise<string[]> {
    const blockers = [...(kit.collectionBlockers ?? kit.blockers)];
-   const current = [
-      ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
-      ...(await inventory(path.join(project, "resources", "media"), "media")),
-      ...(await inventory(path.join(project, "resources", "notices"), "notices")),
-   ];
+   const current = await releaseInventory(project);
    if (JSON.stringify(current) !== JSON.stringify(kit.staged)) blockers.push("Staged files changed after collecting this source kit. Collect a new manifest.");
    for (const source of kit.sources) {
       for (const file of [source, ...source.licenses]) {
@@ -578,11 +585,7 @@ export async function collectKit(project: string, destination: string, downloadS
    } catch {
       /* A fresh kit does not require an earlier manifest. */
    }
-   const staged = [
-      ...(await inventory(path.join(project, "resources", "recorder"), "recorder")),
-      ...(await inventory(path.join(project, "resources", "media"), "media")),
-      ...(await inventory(path.join(project, "resources", "notices"), "notices")),
-   ];
+   const staged = await releaseInventory(project);
    const sources: SourceArchive[] = [];
    const blockers: string[] = [];
    for (const pin of sourcePins) {
@@ -674,6 +677,7 @@ export async function collectKit(project: string, destination: string, downloadS
       }
    }
    const requiredEvidence = ["attaclip-source", "electron-notices"];
+   if (staged.some((file) => file.path === "electron/ffmpeg.dll")) requiredEvidence.push("electron-ffmpeg-source");
    if (staged.some((file) => file.path.startsWith("recorder/") && /\.(dll|exe)$/i.test(file.path))) {
       requiredEvidence.push("obs-dependency-build-config");
       const external = ["w32-pthreads.dll", "zlib.dll", "libcurl.dll", "librist.dll", "srt.dll", "libx264-164.dll"];

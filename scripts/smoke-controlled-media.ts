@@ -1,4 +1,5 @@
 import path from "node:path";
+import sharp from "sharp";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -61,7 +62,7 @@ for (const fixture of fixtures) {
    const duration = Number(info.format.duration);
    if (duration < 1.2 || duration > 1.4 || !info.streams.some((stream) => stream.codec_type === "audio"))
       throw new Error(`Fixture metadata failed: ${fixture.file}`);
-   execute(controlled, ["-i", clip, "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "NUL"]);
+   execute(controlled, ["-xerror", "-i", clip, "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "NUL"]);
    const referenceImage = path.join(temporary, `${fixture.file}.reference.png`);
    const controlledImage = path.join(temporary, `${fixture.file}.controlled.png`);
    for (const [binary, image] of [
@@ -70,7 +71,9 @@ for (const fixture of fixtures) {
    ])
       execute(binary!, ["-i", clip, "-map", "0:v:0", "-frames:v", "1", "-c:v", "png", "-y", image!]);
    const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
-   const matches = hash(await readFile(referenceImage)) === hash(await readFile(controlledImage));
+   const referencePixels = await sharp(referenceImage).raw().toBuffer();
+   const controlledPixels = await sharp(controlledImage).raw().toBuffer();
+   const matches = hash(referencePixels) === hash(controlledPixels);
    if (!matches) throw new Error(`Decoded first frame differs from reference: ${fixture.file}`);
    result.push({
       format: fixture.file,

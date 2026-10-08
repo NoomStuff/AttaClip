@@ -85,15 +85,19 @@ test("real media plays, creates a verified shareable, and supports overlapping c
       await dialog.getByRole("button", { name: "Done", exact: true }).click();
       await expect.poll(async () => (await page.evaluate(() => window.attaClip.state())).clips[0]?.categories.length).toBe(2);
       await page.getByRole("button", { name: "Open Desktop moment", exact: true }).click();
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 }).toBeGreaterThanOrEqual(2);
+      await expect
+         .poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 })
+         .toBeGreaterThanOrEqual(2);
       await page.getByRole("button", { name: "Play", exact: true }).click();
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThan(0.2);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThan(0.2);
       await page.getByRole("button", { name: "Pause", exact: true }).click();
       await page.getByRole("slider", { name: "Playback position", exact: true }).fill("2");
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
       await page.getByRole("combobox", { name: "Audio track", exact: true }).selectOption("2");
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 }).toBeGreaterThanOrEqual(2);
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
+      await expect
+         .poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 })
+         .toBeGreaterThanOrEqual(2);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
       await page.waitForTimeout(350);
       await page.screenshot({ path: "test-results/viewer-original.png" });
       await page.getByRole("button", { name: "Create shareable", exact: true }).click();
@@ -106,22 +110,24 @@ test("real media plays, creates a verified shareable, and supports overlapping c
             .digest("hex")
       ).toBe(originalHash);
       await page.getByRole("button", { name: "Shareable", exact: true }).click();
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 }).toBeGreaterThanOrEqual(2);
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
+      await expect
+         .poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 30000 })
+         .toBeGreaterThanOrEqual(2);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThanOrEqual(1.9);
       await page.waitForTimeout(350);
       await page.screenshot({ path: "test-results/viewer-shareable.png" });
       await page.getByRole("button", { name: "Play", exact: true }).click();
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(false);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(false);
       await page.evaluate(() => window.attaClip.window("minimize"));
       await expect.poll(() => desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isMinimized())).toBe(true);
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(true);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(true);
       await desktop.evaluate(({ BrowserWindow }) => {
          const window = BrowserWindow.getAllWindows()[0];
          window?.restore();
          window?.show();
       });
       await expect.poll(() => desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isMinimized())).toBe(false);
-      await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(true);
+      await expect.poll(() => page.locator(".viewer-main video").evaluate((node: HTMLVideoElement) => node.paused)).toBe(true);
       await page.getByRole("button", { name: "Library", exact: true }).first().click();
       await page
          .getByRole("button", { name: /Best moments/ })
