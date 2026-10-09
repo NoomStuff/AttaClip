@@ -10,6 +10,8 @@ final class Samples: NSObject, SCStreamOutput {
     private var statuses: [Int: Int] = [:]
     private var audioBuffers = 0
     private var peak: Float = 0
+    var reconfigure: SCStreamConfiguration?
+    private var configurationUpdated = false
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         lock.lock()
@@ -18,6 +20,14 @@ final class Samples: NSObject, SCStreamOutput {
             if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
                let status = attachments.first?[.status] as? Int { statuses[status, default: 0] += 1 }
             guard let image = CMSampleBufferGetImageBuffer(sample) else { return }
+            if let configuration = reconfigure, !configurationUpdated {
+                configurationUpdated = true
+                configuration.width = CVPixelBufferGetWidth(image)
+                configuration.height = CVPixelBufferGetHeight(image)
+                stream.updateConfiguration(configuration, completionHandler: { error in
+                    if let error { FileHandle.standardError.write(Data("Stream reconfiguration failed: \(error)\n".utf8)) }
+                })
+            }
             CVPixelBufferLockBaseAddress(image, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
             if let base = CVPixelBufferGetBaseAddress(image) {
@@ -93,6 +103,7 @@ extension Dictionary where Key == Int, Value == Int {
             if mode != "obs-bgra" { configuration.pixelFormat = 0x6c313072 }
         }
         let samples = Samples()
+        if mode == "obs-reconfigure" { samples.reconfigure = configuration }
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         let queue = DispatchQueue(label: "AttaClip.private-sck-proof")
         try stream.addStreamOutput(samples, type: .screen, sampleHandlerQueue: queue)

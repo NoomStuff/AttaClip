@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <Cocoa/Cocoa.h>
-#include <atomic>
 #include <thread>
 
 int attaclip_recorder_main(int argc, char **argv);
@@ -12,25 +11,24 @@ int main(int argc, char **argv) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     [NSApp finishLaunching];
-    std::atomic<bool> finished{false};
     int result = 1;
     std::thread commands([&] {
       @autoreleasepool {
         result = attaclip_recorder_main(argc, argv);
       }
-      finished.store(true);
-      CFRunLoopWakeUp(CFRunLoopGetMain());
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp stop:nil];
+        // stop: from a dispatched callback also needs an event to wake run:.
+        NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                          location:NSZeroPoint modifierFlags:0
+                                         timestamp:0 windowNumber:0 context:nil
+                                           subtype:0 data1:0 data2:0];
+        [NSApp postEvent:event atStart:YES];
+      });
     });
-    while (!finished.load()) {
-      @autoreleasepool {
-        NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                          untilDate:[NSDate dateWithTimeIntervalSinceNow:0.025]
-                                             inMode:NSDefaultRunLoopMode
-                                            dequeue:YES];
-        if (event) [NSApp sendEvent:event];
-        [NSApp updateWindows];
-      }
-    }
+    // The official capture module uses the main callback queue. Let AppKit own
+    // that loop instead of approximating its dispatch with nextEvent polling.
+    [NSApp run];
     commands.join();
     return result;
   }

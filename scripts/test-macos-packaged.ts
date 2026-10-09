@@ -5,7 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { defaultPreferences } from "../src/shared/defaults";
 
@@ -21,36 +21,31 @@ await mkdir(path.join(fixtureContents, "MacOS"), { recursive: true });
 await copyFile(path.resolve("native/macos/fixture-Info.plist"), path.join(fixtureContents, "Info.plist"));
 const binary = path.join(fixtureContents, "MacOS", "fixture");
 await run("swiftc", [path.resolve("native/macos/fixture.swift"), "-o", binary]);
-const fixture = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
+const fixtureOutput = path.join(folder, "fixture-output.jsonl");
+const fixture = spawn("open", ["-n", "-W", path.dirname(fixtureContents), "--args", fixtureOutput], { stdio: ["ignore", "pipe", "pipe"] });
 const fixtureErrors: string[] = [];
 const fixtureHealth: Array<{ engineRunning: boolean; renderedFrames: number }> = [];
 fixture.stderr.on("data", (data: Buffer) => fixtureErrors.push(data.toString()));
-const identity = await new Promise<{ windowId: number; audioStarted: boolean }>((resolve, reject) => {
-   const input = createInterface({ input: fixture.stdout });
-   input.on("line", (line) => {
-      try {
-         const value = z.object({ event: z.literal("audio-health"), engineRunning: z.boolean(), renderedFrames: z.number() }).safeParse(JSON.parse(line));
-         if (value.success) fixtureHealth.push(value.data);
-      } catch {
-         // Initial identity is handled separately; fixture diagnostics cannot alter capture.
+async function waitForFixture() {
+   const deadline = Date.now() + 20000;
+   while (Date.now() < deadline) {
+      const output = await readFile(fixtureOutput, "utf8").catch(() => "");
+      if (output.includes("\n")) {
+         return z
+            .object({ pid: z.number().int().positive(), windowId: z.number().int().positive(), audioStarted: z.boolean() })
+            .parse(JSON.parse(output.split("\n")[0]!));
       }
-   });
-   const timeout = setTimeout(() => {
-      fixture.kill();
-      reject(new Error("The synthetic Mac fixture did not start"));
-   }, 20000);
-   input.once("line", (line) => {
-      clearTimeout(timeout);
-      try {
-         resolve(z.object({ windowId: z.number().int().positive(), audioStarted: z.boolean() }).parse(JSON.parse(line)));
-      } catch (error) {
-         fixture.kill();
-         reject(error);
-      }
-   });
-   fixture.once("error", reject);
+      await delay(50);
+   }
+   throw new Error("The synthetic Mac fixture did not start");
+}
+const identity = await waitForFixture().catch(async (error: unknown) => {
+   await writeFile(`${fixtureOutput}.stop`, "");
+   fixture.kill();
+   throw error;
 });
 if (!identity.audioStarted) {
+   await writeFile(`${fixtureOutput}.stop`, "");
    fixture.kill();
    throw new Error("The runner could not play the generated tone, so packaged audio capture cannot be proven");
 }
@@ -173,6 +168,16 @@ try {
    );
    console.log("Actual packaged macOS application capture, hidden saves, full decoding, and 1 MB sharing passed.");
 } finally {
+   await writeFile(`${fixtureOutput}.stop`, "");
+   for (const line of (await readFile(fixtureOutput, "utf8").catch(() => "")).split("\n").slice(1)) {
+      if (!line) continue;
+      try {
+         const value = z.object({ event: z.literal("audio-health"), engineRunning: z.boolean(), renderedFrames: z.number() }).safeParse(JSON.parse(line));
+         if (value.success) fixtureHealth.push(value.data);
+      } catch {
+         // A final partial diagnostic line must not block process cleanup.
+      }
+   }
    await writeFile(path.join(evidence, "fixture.log"), fixtureErrors.join(""));
    await writeFile(path.join(evidence, "fixture-health.json"), JSON.stringify(fixtureHealth, null, 2));
    if (desktop) await desktop.close();

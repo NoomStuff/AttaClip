@@ -3,6 +3,13 @@ import Cocoa
 import AVFoundation
 import CoreGraphics
 
+let evidencePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : nil
+let evidenceOutput: FileHandle = try {
+    guard let path = evidencePath else { return FileHandle.standardOutput }
+    _ = FileManager.default.createFile(atPath: path, contents: nil)
+    return try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+}()
+
 final class PatternView: NSView {
     var count = 0
     override func draw(_ dirtyRect: NSRect) {
@@ -57,11 +64,15 @@ do {
 } catch {
     FileHandle.standardError.write(Data("Synthetic audio could not start: \(error)\n".utf8))
 }
-let result: [String: Any] = ["windowId": window.windowNumber, "displayId": CGMainDisplayID(), "audioStarted": audio,
+let result: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "windowId": window.windowNumber, "displayId": CGMainDisplayID(), "audioStarted": audio,
     "screenPermission": CGPreflightScreenCaptureAccess(), "microphoneAuthorization": AVCaptureDevice.authorizationStatus(for: .audio).rawValue]
 let json = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
-FileHandle.standardOutput.write(json + Data([10]))
+evidenceOutput.write(json + Data([10]))
 let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+    if let path = evidencePath, FileManager.default.fileExists(atPath: path + ".stop") {
+        app.terminate(nil)
+        return
+    }
     view.count += 1
     view.needsDisplay = true
     view.displayIfNeeded()
@@ -73,7 +84,7 @@ let healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ i
     let health: [String: Any] = ["event": "audio-health", "engineRunning": engine.isRunning, "renderedFrames": frames,
         "visualCount": view.count, "bundleIdentifier": Bundle.main.bundleIdentifier ?? "", "foreground": app.isActive]
     if let data = try? JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]) {
-        FileHandle.standardOutput.write(data + Data([10]))
+        evidenceOutput.write(data + Data([10]))
     }
 }
 app.run()

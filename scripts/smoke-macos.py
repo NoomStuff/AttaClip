@@ -2,7 +2,6 @@
 import json
 import os
 import pathlib
-import queue
 import re
 import shutil
 import subprocess
@@ -83,29 +82,37 @@ try:
     shutil.copyfile(root / "native/macos/fixture-Info.plist", fixture_contents / "Info.plist")
     fixture_binary = fixture_contents / "MacOS" / "fixture"
     subprocess.run(["swiftc", str(root / "native/macos/fixture.swift"), "-o", str(fixture_binary)], check=True)
-    fixture = launch([str(fixture_binary)], "fixture", True)
-    # This fixture is its own process. SCK excludes recorder process audio only.
-    first_line = queue.Queue()
-    threading.Thread(target=lambda: first_line.put(fixture.stdout.readline()), daemon=True).start()
-    try:
-        identity = json.loads(first_line.get(timeout=20))
-    except queue.Empty:
-        raise RuntimeError("The synthetic Mac fixture did not start within 20 seconds")
+    # LaunchServices gives the fixture its own app attribution. Shell-launched
+    # siblings can be grouped into the recorder's excluded process audio.
+    fixture_output = folder / "fixture-output.jsonl"
+    fixture = launch(["open", "-n", "-W", str(fixture_contents.parent), "--args", str(fixture_output)], "fixture")
+    deadline = time.monotonic() + 20
+    while not fixture_output.exists() or "\n" not in fixture_output.read_text():
+        if time.monotonic() > deadline:
+            raise RuntimeError("The synthetic Mac fixture did not start within 20 seconds")
+        time.sleep(0.05)
+    identity = json.loads(fixture_output.read_text().splitlines()[0])
     (folder / "fixture.json").write_text(json.dumps(identity, indent=2))
     # Permission belongs to the recorder process, not this independent fixture.
     # createCapture checks it before opening ScreenCaptureKit.
     assert identity["audioStarted"], "The runner could not play the generated tone, so audio capture cannot be proven"
     fixture_health = []
     def read_fixture():
-        for line in fixture.stdout:
-            fixture_health.append(json.loads(line))
+        with fixture_output.open() as output:
+            output.readline()
+            while not (folder / "fixture-output.jsonl.stop").exists():
+                line = output.readline()
+                if line:
+                    fixture_health.append(json.loads(line))
+                else:
+                    time.sleep(0.05)
     threading.Thread(target=read_fixture, daemon=True).start()
     # Compare Apple's display stream against OBS without accepting substitute footage.
     probe = folder / "sck-probe"
     subprocess.run(["swiftc", "-parse-as-library", str(root / "native/macos/sck-probe.swift"), "-o", str(probe)], check=True)
     direct_results = []
     direct_logs = []
-    for mode in ("baseline", "obs-bgra", "obs-l10r", "obs-included-audio"):
+    for mode in ("baseline", "obs-bgra", "obs-l10r", "obs-included-audio", "obs-reconfigure"):
         try:
             direct = subprocess.run([str(probe), str(identity["displayId"]), mode], capture_output=True, text=True, timeout=15)
             direct_logs.append(mode + "\n" + direct.stderr)
@@ -127,7 +134,7 @@ try:
     command(dict(action="candidates"))
     candidate_event = wait(lambda event: event["event"] == "candidates")
     candidate = next((item for item in candidate_event["windows"] if item["id"] == f"window:{identity['windowId']}:0"), None)
-    assert candidate and candidate["pid"] == fixture.pid and candidate["executable"], candidate_event
+    assert candidate and candidate["pid"] == identity["pid"] and candidate["executable"], candidate_event
     media = []
     for kind in ("screen", "app"):
         source_id = f"window:{identity['windowId']}:0" if kind == "app" else f"screen:{identity['displayId']}:0"
@@ -162,6 +169,7 @@ try:
     (root / ".cache/macos-capture/latest-proof.json").write_text(json.dumps(proof, indent=2))
     print(json.dumps(proof, indent=2))
 finally:
+    (folder / "fixture-output.jsonl.stop").touch()
     (folder / "fixture-health.json").write_text(json.dumps(locals().get("fixture_health", []), indent=2))
     (folder / "native-events.json").write_text(json.dumps(events, indent=2))
     for child in reversed(processes):
