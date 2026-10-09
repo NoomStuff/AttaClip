@@ -23,4 +23,5 @@ build/*.ico
 build/*.icns
 64bit/
 build-report/
+__pycache__/
 

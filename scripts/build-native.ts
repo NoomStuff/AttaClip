@@ -133,6 +133,7 @@ if (path.resolve(runtime) !== path.join(path.resolve(root), "resources", "record
 await rm(runtime, { recursive: true, force: true });
 await mkdir(runtime, { recursive: true });
 await copyFile(path.join(output, "Release", "attaclip-recorder.exe"), path.join(runtime, "attaclip-recorder.exe"));
+await copyFile(path.join(output, "notifications", "Release", "attaclip-notifier.exe"), path.join(runtime, "attaclip-notifier.exe"));
 const binaries = [
    "obs.dll",
    "libobs-d3d11.dll",
@@ -184,7 +185,13 @@ await writeFile(
               },
          sourceHashes: Object.fromEntries(
             await Promise.all(
-               ["native/recorder.cpp", "native/CMakeLists.txt", "scripts/build-native.ts"].map(async (file) => [
+               [
+                  "native/recorder.cpp",
+                  "native/CMakeLists.txt",
+                  "native/notifications/windows.cpp",
+                  "native/notifications/CMakeLists.txt",
+                  "scripts/build-native.ts",
+               ].map(async (file) => [
                   file,
                   createHash("sha256")
                      .update(await readFile(path.join(root, file)))
@@ -194,7 +201,7 @@ await writeFile(
          ),
          binaryHashes: Object.fromEntries(
             await Promise.all(
-               ["attaclip-recorder.exe", ...binaries].map(async (file) => [
+               ["attaclip-recorder.exe", "attaclip-notifier.exe", ...binaries].map(async (file) => [
                   file,
                   createHash("sha256")
                      .update(await readFile(path.join(runtime, file)))

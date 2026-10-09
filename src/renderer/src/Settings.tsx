@@ -111,7 +111,15 @@ export function ShortcutInput({ value, onChange }: { value: string; onChange: (v
       </button>
    );
 }
-export function QualityPicker({ value, onChange }: { value: Preferences["quality"]; onChange: (value: Preferences["quality"]) => void }) {
+export function QualityPicker({
+   value,
+   onChange,
+   recommended,
+}: {
+   value: Preferences["quality"];
+   onChange: (value: Preferences["quality"]) => void;
+   recommended?: "low" | "standard";
+}) {
    return (
       <div className="quality-options">
          {(
@@ -131,7 +139,7 @@ export function QualityPicker({ value, onChange }: { value: Preferences["quality
                <span className="quality-dot">{value === item.value && <Check size={12} />}</span>
                <strong>{item.title}</strong>
                <span>{item.detail}</span>
-               <small>{item.note}</small>
+               <small>{item.value === recommended ? "Recommended for this device" : item.note}</small>
             </button>
          ))}
       </div>

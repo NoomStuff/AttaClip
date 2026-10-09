@@ -4,6 +4,7 @@ const api: DesktopAPI = {
    state: () => ipcRenderer.invoke("state"),
    sources: () => ipcRenderer.invoke("sources"),
    games: () => ipcRenderer.invoke("games"),
+   recordingCapabilities: () => ipcRenderer.invoke("recording-capabilities"),
    previewSource: (sourceId) => ipcRenderer.invoke("preview-source", sourceId),
    audioDevices: () => ipcRenderer.invoke("audio-devices"),
    savePreferences: (value) => ipcRenderer.invoke("preferences", value),

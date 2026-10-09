@@ -21,9 +21,15 @@ jobs:
            run: |
               sudo add-apt-repository -y ppa:obsproject/obs-studio
               sudo apt-get update
-              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libxcb-composite0-dev libsimde-dev xvfb openbox x11-apps x11-xserver-utils ffmpeg pulseaudio pulseaudio-utils
+              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libxcb-composite0-dev libpulse-dev libsimde-dev xvfb openbox x11-apps x11-xserver-utils ffmpeg pulseaudio pulseaudio-utils
          - name: Build native X11 recorder
            run: bun scripts/build-native-linux.ts
+         - name: Build isolated application audio fixtures
+           run: |
+              cmake -S native/tests -B .cache/native-tests -DCMAKE_BUILD_TYPE=Release
+              cmake --build .cache/native-tests -j2
+         - name: Verify selected application audio isolation and recovery
+           run: python3 scripts/smoke-linux-app-audio.py resources/recorder
          - name: Record actual screen and audio
            run: python3 scripts/smoke-linux.py resources/recorder
            env:

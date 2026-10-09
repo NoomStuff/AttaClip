@@ -29,6 +29,7 @@ import { serveMedia } from "./serve";
 import { Updates } from "./updates";
 import { linuxStartup } from "./startup";
 import { pendingExitDecision } from "./lifecycle";
+import { Feedback } from "./feedback";
 
 protocol.registerSchemesAsPrivileged([{ scheme: "attaclip-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +61,12 @@ const collections = new CollectionService({
    mediaUrl,
 });
 const updates = new Updates(() => emitState());
+const feedback = new Feedback(
+   app.isPackaged
+      ? join(process.resourcesPath, "recorder", process.platform === "win32" ? "attaclip-notifier.exe" : "attaclip-notifier")
+      : resolve(here, "../../resources/recorder", process.platform === "win32" ? "attaclip-notifier.exe" : "attaclip-notifier"),
+   (message) => void log(message)
+);
 const recorder = new Recorder({
    gameCatalogPath: join(app.getPath("userData"), "game-catalog.json"),
    onAudioLevels: (levels) => {
@@ -77,7 +84,7 @@ const recorder = new Recorder({
    onSaved: async (path, source, _requestId, capture) => {
       const clip = await collections.registerRecording(path, source);
       emitState();
-      notice(capture.previousFootage ? "Saved last available footage" : "Clip saved");
+      notice(capture.previousFootage ? "Saved last available footage" : "Clip saved", false, "saved");
       if (preferences.autoShare) {
          void collections.createShareable(clip.id, preferences.shareSizeMB).catch((e) => notice(errorMessage(e), true));
       }
@@ -132,56 +139,18 @@ async function log(message: string) {
       /* Diagnostics must not break capture. */
    }
 }
-function notice(message: string, error = false) {
+function notice(message: string, error = false, kind: "info" | "saving" | "saved" = "info") {
    send({ type: "notice", message, error });
    void log(message);
-   if (preferences?.sound && process.env["ATTACLIP_TEST"] !== "1" && (error || message === "Clip saved")) shell.beep();
-   if (preferences?.notifications !== "off") void showFeedback(message, error).catch(() => undefined);
+   if (preferences?.sound && process.env["ATTACLIP_TEST"] !== "1" && (error || kind === "saved")) shell.beep();
+   if (preferences?.notifications !== "off") void showFeedback(message, error, kind === "saving").catch(() => undefined);
 }
-let feedback: BrowserWindow | null = null;
-let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
-async function showFeedback(message: string, error: boolean) {
-   // A lightweight, non-activating window. Exclusive fullscreen visibility depends
-   // on the compositor; native overlays remain a separate platform integration.
+async function showFeedback(message: string, error: boolean, saving: boolean) {
    if (process.env["ATTACLIP_TEST"] === "1") return;
    if (preferences.notifications === "outside-fullscreen" && (await recorder.foregroundFullscreen())) return;
-   const escaped = message.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
-   if (feedback && !feedback.isDestroyed()) feedback.close();
-   const display = mainWindow ? requireDisplay(mainWindow) : null;
-   feedback = new BrowserWindow({
-      width: 320,
-      height: 78,
-      ...(display ? { x: display.x + display.width - 340, y: display.y + 20 } : {}),
-      frame: false,
-      transparent: true,
-      resizable: false,
-      focusable: false,
-      skipTaskbar: true,
-      alwaysOnTop: true,
-      show: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
-   });
-   feedback.setContentProtection(true);
-   const html = `<!doctype html><html><body style="margin:0;background:transparent;font:14px 'Segoe UI',sans-serif;color:#f5f2fa"><div style="display:flex;align-items:center;gap:12px;padding:19px;background:#211d28;border-radius:14px;animation:enter .2s ease-out"><span style="color:${error ? "#fb8b8b" : "#b197fc"};font-size:24px">${error ? "!" : "✓"}</span><span>${escaped}</span></div><style>@keyframes enter{from{transform:translateY(-8px);opacity:0}to{transform:none;opacity:1}}</style></body></html>`;
-   const popup = feedback;
-   void popup
-      .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-      .then(() => {
-         if (!popup.isDestroyed()) popup.showInactive();
-      })
-      .catch(() => undefined);
-   clearTimeout(feedbackTimer);
-   feedbackTimer = setTimeout(
-      () => {
-         if (!popup.isDestroyed()) popup.close();
-      },
-      error ? 6500 : 2300
-   );
+   feedback.show(message, error, saving);
 }
 import { screen } from "electron";
-function requireDisplay(window: BrowserWindow) {
-   return screen.getDisplayMatching(window.getBounds()).workArea;
-}
 async function sources(): Promise<CaptureSource[]> {
    const list = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 640, height: 360 }, fetchWindowIcons: false });
    cachedSources = list
@@ -310,7 +279,7 @@ async function saveClip() {
    if (!withinRoot(collections.root, realpathSync(dirname(destination))))
       throw new Error("The recording folder points outside this collection. Choose another folder.");
    await recorder.save(destination, requestedAt);
-   notice("Saving clip…");
+   notice("Saving clip…", false, "saving");
 }
 function pendingJobs() {
    return collections.jobs.filter((j) => j.state === "running" || j.state === "queued");
@@ -394,6 +363,7 @@ async function requestExit() {
    try {
       if (await prepareExit()) {
          quitting = true;
+         feedback.close();
          globalShortcut.unregisterAll();
          app.quit();
       }
@@ -425,6 +395,7 @@ function handle(channel: string, fn: (...args: unknown[]) => unknown) {
    });
 }
 function registerIPC() {
+   handle("recording-capabilities", () => recorder.capabilities());
    handle("state", () => state());
    handle("sources", () => sources());
    handle("games", () => recorder.games(preferences.customGames));
@@ -629,7 +600,7 @@ else {
       if (!quitting) {
          event.preventDefault();
          void requestExit();
-      }
+      } else feedback.close();
    });
    app.on("window-all-closed", () => {
       /* The recorder and tray own the app lifecycle. */

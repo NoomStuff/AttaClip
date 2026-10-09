@@ -26,6 +26,7 @@ window.backgroundColor = .black
 window.contentView = view
 window.level = .normal
 window.orderFrontRegardless()
+app.activate(ignoringOtherApps: true)
 let engine = AVAudioEngine()
 var phase = 0.0
 let renderLock = NSLock()
@@ -63,12 +64,14 @@ FileHandle.standardOutput.write(json + Data([10]))
 let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
     view.count += 1
     view.needsDisplay = true
+    view.displayIfNeeded()
 }
 let healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
     renderLock.lock()
     let frames = renderedFrames
     renderLock.unlock()
-    let health: [String: Any] = ["event": "audio-health", "engineRunning": engine.isRunning, "renderedFrames": frames]
+    let health: [String: Any] = ["event": "audio-health", "engineRunning": engine.isRunning, "renderedFrames": frames,
+        "visualCount": view.count, "bundleIdentifier": Bundle.main.bundleIdentifier ?? "", "foreground": app.isActive]
     if let data = try? JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]) {
         FileHandle.standardOutput.write(data + Data([10]))
     }

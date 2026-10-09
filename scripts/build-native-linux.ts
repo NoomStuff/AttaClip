@@ -63,7 +63,15 @@ for (const input of initialFiles) {
       });
    }
 }
-const sourceFiles = ["native/recorder.cpp", "native/CMakeLists.txt", "scripts/build-native-linux.ts"];
+const sourceFiles = [
+   "native/recorder.cpp",
+   "native/x11-compat.cpp",
+   "native/x11-compat.hpp",
+   "native/linux-app-audio.cpp",
+   "native/linux-app-audio.hpp",
+   "native/CMakeLists.txt",
+   "scripts/build-native-linux.ts",
+];
 await writeFile(
    path.join(runtime, "provenance.json"),
    JSON.stringify(
@@ -89,9 +97,7 @@ await writeFile(
          ),
          limitations: [
             "Wayland capture unavailable",
-            "Application capture unavailable",
-            "Automatic game detection unavailable",
-            "Avoid-overlap unavailable",
+            "Exact-window CPU compatibility capture can increase recording cost",
             "Corresponding Ubuntu dependency sources must be collected before public binary distribution",
          ],
       },

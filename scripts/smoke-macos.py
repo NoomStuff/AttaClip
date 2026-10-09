@@ -4,6 +4,7 @@ import os
 import pathlib
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -77,7 +78,10 @@ def validate(file, audio_expected):
     return dict(path=str(file.relative_to(root)), pixels=pixels, audioMeanDB=levels, duration=float(info["format"]["duration"]))
 
 try:
-    fixture_binary = folder / "fixture"
+    fixture_contents = folder / "Fixture.app" / "Contents"
+    (fixture_contents / "MacOS").mkdir(parents=True)
+    shutil.copyfile(root / "native/macos/fixture-Info.plist", fixture_contents / "Info.plist")
+    fixture_binary = fixture_contents / "MacOS" / "fixture"
     subprocess.run(["swiftc", str(root / "native/macos/fixture.swift"), "-o", str(fixture_binary)], check=True)
     fixture = launch([str(fixture_binary)], "fixture", True)
     # This fixture is its own process. SCK excludes recorder process audio only.
@@ -88,7 +92,8 @@ try:
     except queue.Empty:
         raise RuntimeError("The synthetic Mac fixture did not start within 20 seconds")
     (folder / "fixture.json").write_text(json.dumps(identity, indent=2))
-    assert identity["screenPermission"], "Hosted macOS runner has no Screen Recording permission"
+    # Permission belongs to the recorder process, not this independent fixture.
+    # createCapture checks it before opening ScreenCaptureKit.
     assert identity["audioStarted"], "The runner could not play the generated tone, so audio capture cannot be proven"
     fixture_health = []
     def read_fixture():

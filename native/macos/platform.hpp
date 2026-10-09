@@ -5,6 +5,7 @@
 #include <json.hpp>
 #include <obs.h>
 #include <string>
+#include <vector>
 
 namespace attaclip::macos {
 void prepareProcess(const std::filesystem::path &root);
@@ -18,6 +19,7 @@ std::string captureError();
 nlohmann::json candidates();
 bool foregroundFullscreen();
 void requireMicrophonePermission();
+std::vector<std::string> hardwareEncoders();
 std::string hardwareEncoder(obs_data_t *settings, int cq, int width, int height,
                             int fps);
 }

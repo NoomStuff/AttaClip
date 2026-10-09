@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stoppedRecorder } from "../shared/defaults";
-import type { CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState } from "../shared/types";
+import type { CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState, RecordingCapabilities } from "../shared/types";
 import { GameCatalog, selectGame } from "./games";
 
 interface RecorderOptions {
@@ -37,6 +37,7 @@ interface NativeMessage {
    candidates?: GameCandidate[];
    sourceId?: string;
    sourceKind?: "screen" | "app" | "waiting";
+   encoders?: string[];
 }
 
 export class Recorder {
@@ -63,6 +64,7 @@ export class Recorder {
    private autoBusy = false;
    private autoGeneration = 0;
    private focused = new Map<string, number>();
+   private encoders: string[] = [];
    constructor(options: RecorderOptions) {
       this.options = options;
       this.catalog = new GameCatalog(options.gameCatalogPath ?? path.join(process.cwd(), ".cache", "game-catalog.json"));
@@ -105,6 +107,27 @@ export class Recorder {
          };
          this.send({ action: "audio-devices" });
       });
+   }
+   async capabilities(): Promise<RecordingCapabilities> {
+      if (!this.current.supported)
+         return { supported: false, hardwareEncoders: [], recommended: "standard", message: "The recorder is missing from this build." };
+      try {
+         await this.initialize();
+         const hardwareEncoders = [...this.encoders];
+         return {
+            supported: true,
+            hardwareEncoders,
+            recommended: hardwareEncoders.length ? "standard" : "low",
+            message: hardwareEncoders.length ? "" : "No supported hardware encoder was found. Software encoding uses your CPU.",
+         };
+      } catch (failure) {
+         return {
+            supported: false,
+            hardwareEncoders: [],
+            recommended: "standard",
+            message: failure instanceof Error ? failure.message : "The recorder could not initialize.",
+         };
+      }
    }
    async games(additions: CustomGame[] = []): Promise<GameCandidate[]> {
       if (!this.current.supported) return [];
@@ -300,6 +323,7 @@ export class Recorder {
       }
       if (value.event === "ready") {
          this.current.supported = true;
+         this.encoders = Array.isArray(value.encoders) ? value.encoders.filter((value) => typeof value === "string" && value.length < 200) : [];
          this.readyResolve?.();
          this.readyResolve = null;
          this.readyReject = null;

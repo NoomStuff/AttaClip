@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Clapperboard, Folder, LoaderCircle, Mic, Monitor, Share2, Video } from "lucide-react";
-import type { AppState, CaptureSource, Preferences } from "../../shared/types";
+import type { AppState, CaptureSource, Preferences, RecordingCapabilities } from "../../shared/types";
 import { api, Button, Field, Segmented, Select, Toggle } from "./ui";
 import type { Run } from "./ui";
 import { customQualityError, CustomQualityControls, QualityPicker, ShortcutInput } from "./Settings";
@@ -13,6 +13,31 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
    const [busy, setBusy] = useState(false);
    const [micPermission, setMicPermission] = useState("");
    const [audioDevices, setAudioDevices] = useState<{ id: string; name: string }[]>([]);
+   const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
+   const qualityChosen = useRef(false);
+   useEffect(() => {
+      if (step !== 3 || capabilities) return;
+      let disposed = false;
+      void api
+         .recordingCapabilities()
+         .then((result) => {
+            if (disposed) return;
+            setCapabilities(result);
+            if (!qualityChosen.current && result.supported) setDraft((current) => ({ ...current, quality: result.recommended }));
+         })
+         .catch((failure: unknown) => {
+            if (!disposed)
+               setCapabilities({
+                  supported: false,
+                  hardwareEncoders: [],
+                  recommended: "standard",
+                  message: failure instanceof Error ? failure.message : "The recorder could not initialize.",
+               });
+         });
+      return () => {
+         disposed = true;
+      };
+   }, [step, capabilities]);
    useEffect(() => {
       if (step === 1 && draft.microphone) void run(async () => setAudioDevices(await api.audioDevices()));
    }, [step, draft.microphone, run]);
@@ -223,13 +248,33 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
                            <Video size={25} />
                         </div>
                         <h2>Find your balance</h2>
-                        <p>Choose how much detail to keep. Standard is a sensible starting point for most hardware.</p>
-                        <QualityPicker value={draft.quality} onChange={(value) => change("quality", value)} />
+                        <p>Choose how much detail to keep.</p>
+                        <QualityPicker
+                           value={draft.quality}
+                           {...(capabilities?.supported ? { recommended: capabilities.recommended } : {})}
+                           onChange={(value) => {
+                              qualityChosen.current = true;
+                              change("quality", value);
+                           }}
+                        />
                         {draft.quality === "custom" && (
                            <CustomQualityControls value={draft} onChange={(patch) => setDraft((current) => ({ ...current, ...patch }))} />
                         )}
                         {customQualityError(draft) && <p className="permission-note">{customQualityError(draft)}</p>}
-                        <div className="setup-secondary">A hardware encoder is used when available. If recording affects your game, try Low.</div>
+                        {capabilities?.message && <p className="permission-note">{capabilities.message}</p>}
+                        {capabilities?.supported && !capabilities.hardwareEncoders.length && draft.quality !== "custom" && (
+                           <Toggle
+                              label="Allow software encoding"
+                              detail="Uses your CPU to record. Low reduces the cost."
+                              checked={draft.allowSoftwareEncoder}
+                              onChange={(value) => change("allowSoftwareEncoder", value)}
+                           />
+                        )}
+                        <div className="setup-secondary">
+                           {capabilities?.hardwareEncoders.length
+                              ? "Hardware encoding is available. If recording affects your game, try Low."
+                              : "If recording affects your game, try Low."}
+                        </div>
                      </>
                   )}
                   {step === 4 && (

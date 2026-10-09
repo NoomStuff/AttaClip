@@ -21,6 +21,12 @@ export interface CustomGame {
    name: string;
    executable: string;
 }
+export interface RecordingCapabilities {
+   supported: boolean;
+   hardwareEncoders: string[];
+   recommended: "low" | "standard";
+   message: string;
+}
 export interface Preferences {
    collection: string;
    clipSeconds: number;
@@ -138,6 +144,7 @@ export interface DesktopAPI {
    state(): Promise<AppState>;
    sources(): Promise<CaptureSource[]>;
    games(): Promise<GameCandidate[]>;
+   recordingCapabilities(): Promise<RecordingCapabilities>;
    previewSource(sourceId: string | null): Promise<void>;
    audioDevices(): Promise<{ id: string; name: string }[]>;
    savePreferences(value: Preferences): Promise<AppState>;

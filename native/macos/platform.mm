@@ -158,9 +158,7 @@ obs_source_t *createCapture(const nlohmann::json &configuration) {
   obs_data_set_int(settings, "type", kind == "screen" ? 0 : 1);
   obs_data_set_int(settings, "window", window);
   obs_data_set_bool(settings, "show_cursor", true);
-  // Use ScreenCaptureKit's application filter for screen audio. The recorder
-  // itself has no visible window. Excluding it does not hide the Electron UI.
-  obs_data_set_bool(settings, "hide_obs", true);
+  obs_data_set_bool(settings, "hide_obs", false);
   obs_data_set_bool(settings, "show_hidden_windows", false);
   if (display) {
     CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);
@@ -268,10 +266,10 @@ void requireMicrophonePermission() {
     throw std::runtime_error("Allow AttaClip microphone access in System Settings before recording your microphone");
 }
 
-std::string hardwareEncoder(obs_data_t *settings, int cq, int width, int height, int fps) {
+std::vector<std::string> hardwareEncoders() {
   CFArrayRef encoders = nullptr;
   if (VTCopyVideoEncoderList(nullptr, &encoders) != noErr || !encoders) return {};
-  std::string chosen;
+  std::vector<std::string> result;
   for (CFIndex i = 0; i < CFArrayGetCount(encoders); ++i) {
     auto entry = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(encoders, i));
     auto hardware = static_cast<CFBooleanRef>(CFDictionaryGetValue(entry, kVTVideoEncoderList_IsHardwareAccelerated));
@@ -282,11 +280,16 @@ std::string hardwareEncoder(obs_data_t *settings, int cq, int width, int height,
     const auto id = text(static_cast<CFStringRef>(CFDictionaryGetValue(entry, kVTVideoEncoderList_EncoderID)));
     const char *registered = nullptr;
     for (size_t j = 0; obs_enum_encoder_types(j, &registered); ++j)
-      if (id == registered) { chosen = id; break; }
-    if (!chosen.empty()) break;
+      if (id == registered) { result.push_back(id); break; }
   }
   CFRelease(encoders);
-  if (chosen.empty()) return {};
+  return result;
+}
+
+std::string hardwareEncoder(obs_data_t *settings, int cq, int width, int height, int fps) {
+  const auto encoders = hardwareEncoders();
+  if (encoders.empty()) return {};
+  const auto &chosen = encoders.front();
   auto *properties = obs_get_encoder_properties(chosen.c_str());
   auto *rates = properties ? obs_properties_get(properties, "rate_control") : nullptr;
   bool qualityRate = false;

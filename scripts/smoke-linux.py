@@ -151,10 +151,7 @@ try:
         assert candidate and candidate["pid"] == fixture.pid, "Candidate must identify the real ffplay PID"
         assert pathlib.Path(candidate["executable"]).name == "ffplay"
         config = dict(sourceKind="auto",resolvedKind="app",sourceId=candidate["id"],pid=candidate["pid"],sourceName=title,quality="custom",customWidth=640,customHeight=360,customFPS=24,customCQ=28,clipSeconds=2,microphone=False,allowSoftwareEncoder=True)
-        denied = command(dict(config,action="start",captureAudio=True), "error")
-        assert "Desktop audio will not be substituted" in denied["message"]
-        command(dict(action="stop"))
-        command(dict(config,action="start",captureAudio=False))
+        command(dict(config,action="start",captureAudio=True))
         cover=launch(["ffplay","-v","error","-f","lavfi","-i","color=red:size=640x360:rate=30:duration=30","-window_title","Unrelated red window must not leak","-fs","-alwaysontop","-an"],"occluding-application")
         time.sleep(1)
         def cpu_ticks():

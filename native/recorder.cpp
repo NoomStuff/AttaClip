@@ -22,6 +22,7 @@
 #include "macos/platform.hpp"
 #endif
 #ifdef __linux__
+#include "linux-app-audio.hpp"
 #include "x11-compat.hpp"
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
@@ -241,6 +242,9 @@ obs_source_t *createCaptureSource(const char *id, obs_data_t *settings) {
   return obs_source_create_private(id, "Capture", settings);
 }
 std::vector<std::string> hardwareEncoders() {
+#ifdef __APPLE__
+  return attaclip::macos::hardwareEncoders();
+#else
   std::vector<std::string> result;
   // These are hardware encoders, including the upload path on a secondary
   // GPU. OBS modules register them only after their device availability probe.
@@ -253,6 +257,7 @@ std::vector<std::string> hardwareEncoders() {
         result.emplace_back(preferred);
   }
   return result;
+#endif
 }
 const char *graphicsModule() {
 #ifdef _WIN32
@@ -350,6 +355,9 @@ public:
   obs_scene_t *scene = nullptr;
   obs_source_t *capture = nullptr;
   obs_source_t *desktop = nullptr;
+#ifdef __linux__
+  ApplicationAudio *applicationAudio = nullptr;
+#endif
   obs_source_t *mic = nullptr;
   obs_sceneitem_t *item = nullptr;
   std::mutex mutex;
@@ -444,6 +452,10 @@ public:
     obs_set_output_source(0, nullptr);
     obs_set_output_source(1, nullptr);
     obs_set_output_source(2, nullptr);
+#ifdef __linux__
+    destroyApplicationAudio(applicationAudio);
+    applicationAudio = nullptr;
+#endif
     if (scene) {
       obs_scene_release(scene);
       scene = nullptr;
@@ -514,6 +526,8 @@ public:
 #ifdef __linux__
     if (!screenCapture && !windowCompatibility && captureTextureFailure)
       return false;
+    if (!applicationAudioError(applicationAudio).empty())
+      return false;
     if (windowCompatibility && !x11CompatibilityAvailable(targetWindow.load()))
       return false;
     return x11Available(targetWindow.load(), targetProcess.load());
@@ -554,6 +568,8 @@ public:
       obs_source_t *source =
 #ifdef __APPLE__
           capture;
+#elif defined(__linux__)
+          screenCapture ? desktop : applicationAudioSource(applicationAudio);
 #else
           screenCapture ? desktop : capture;
 #endif
@@ -882,8 +898,18 @@ public:
       if (capture)
         obs_source_release(capture);
       capture = nullptr;
+#ifdef __linux__
+      obs_set_output_source(1, nullptr);
+      destroyApplicationAudio(applicationAudio);
+      applicationAudio = nullptr;
+#endif
       if (desktop)
         obs_source_set_muted(desktop, true);
+#ifdef __linux__
+      if (desktop)
+        obs_source_release(desktop);
+      desktop = nullptr;
+#endif
       screenCapture = false;
       std::lock_guard<std::mutex> lock(mutex);
       sourceName = c.value("sourceName", "Waiting for game");
@@ -1037,11 +1063,6 @@ public:
       throw std::runtime_error("Native Linux capture currently requires an X11 "
                                "session. Wayland capture is unavailable");
     if (kind == "app") {
-      if (c.value("captureAudio", true))
-        throw std::runtime_error(
-            "Application audio capture is unavailable on Linux. Turn off "
-            "Capture audio to record this application's video. Desktop audio "
-            "will not be substituted");
       std::string id = c.value("sourceId", "");
       if (id.rfind("window:", 0) != 0)
         throw std::runtime_error(
@@ -1143,7 +1164,6 @@ public:
       if (id.rfind("window:", 0) == 0)
         target = std::stoull(id.substr(7));
     }
-    targetWindow = target;
     uint32_t targetPid = 0;
 #ifdef _WIN32
     if (target) {
@@ -1158,6 +1178,38 @@ public:
       targetPid = cardinal(uint32_t(target), "_NET_WM_PID");
     }
 #endif
+#ifdef __linux__
+    ApplicationAudio *nextAudio = nullptr;
+    try {
+      if (target && c.value("captureAudio", true))
+        nextAudio = createApplicationAudio(targetPid);
+      if (kind == "screen" && !desktop) {
+        auto *settings = obs_data_create();
+        obs_data_set_string(settings, "device_id", "default");
+        desktop =
+            obs_source_create_private(desktopType(), "Capture audio", settings);
+        obs_data_release(settings);
+        if (!desktop)
+          throw std::runtime_error("Desktop audio could not be opened");
+        obs_source_set_audio_mixers(desktop, 3);
+      }
+    } catch (...) {
+      obs_source_release(next);
+      throw;
+    }
+    obs_volmeter_detach_source(captureMeter);
+    obs_set_output_source(1, nullptr);
+    destroyApplicationAudio(applicationAudio);
+    applicationAudio = nextAudio;
+    obs_set_output_source(1, kind == "screen"
+                                 ? desktop
+                                 : applicationAudioSource(applicationAudio));
+    if (kind != "screen" && desktop) {
+      obs_source_release(desktop);
+      desktop = nullptr;
+    }
+#endif
+    targetWindow = target;
     targetProcess = targetPid;
     windowCompatibility = compatibility;
 #ifdef _WIN32
@@ -1197,6 +1249,8 @@ public:
     obs_source_t *audioSource =
 #ifdef __APPLE__
         capture;
+#elif defined(__linux__)
+        screenCapture ? desktop : applicationAudioSource(applicationAudio);
 #else
         screenCapture ? desktop : capture;
 #endif
@@ -1250,6 +1304,9 @@ public:
     obs_set_output_source(0, obs_scene_get_source(scene));
     auto *d = obs_data_create();
 #ifndef __APPLE__
+#ifdef __linux__
+    obs_data_release(d);
+#else
     obs_data_set_string(d, "device_id", "default");
     desktop = obs_source_create_private(desktopType(), "Capture audio", d);
     obs_data_release(d);
@@ -1257,6 +1314,7 @@ public:
       obs_source_set_audio_mixers(desktop, 3);
       obs_set_output_source(1, desktop);
     }
+#endif
 #else
     obs_data_release(d);
 #endif
@@ -1474,6 +1532,7 @@ int main(int argc, char **argv) {
     obs_post_load_modules();
 #ifdef __linux__
     registerX11CompatibilitySource();
+    registerLinuxApplicationAudio();
 #endif
     obs_audio_info ai{};
     ai.samples_per_sec = 48000;
@@ -1589,6 +1648,9 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
             fullscreen = attaclip::macos::foregroundFullscreen();
             captureError = attaclip::macos::captureError();
+#endif
+#ifdef __linux__
+            captureError = applicationAudioError(r.applicationAudio);
 #endif
             emit({{"event", "status"},
                   {"fullscreen", fullscreen},
