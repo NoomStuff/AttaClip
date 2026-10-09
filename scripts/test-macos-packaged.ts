@@ -127,16 +127,21 @@ try {
       }
       const { stdout } = await run(
          ffmpeg,
-         ["-v", "error", "-ss", "1", "-i", clip.path, "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+         ["-v", "error", "-i", clip.path, "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
          { encoding: "buffer" }
       );
-      expect(stdout.length).toBe(3);
-      expect(
-         [
+      expect(stdout.length).toBeGreaterThanOrEqual(6);
+      expect(stdout.length % 3).toBe(0);
+      const classes = new Set<number>();
+      for (let offset = 0; offset < stdout.length; offset += 3) {
+         const color = [
             [228, 76, 102],
             [65, 184, 170],
-         ].some((color) => color.every((channel, index) => Math.abs(channel - stdout[index]!) <= 22))
-      ).toBe(true);
+         ].findIndex((fixtureColor) => fixtureColor.every((channel, index) => Math.abs(channel - stdout[offset + index]!) <= 22));
+         expect(color).toBeGreaterThanOrEqual(0);
+         classes.add(color);
+      }
+      expect([...classes].sort()).toEqual([0, 1]);
    }
    await page.evaluate((id) => window.attaClip.createShareable(id, 1), original.id);
    await expect.poll(() => page.evaluate(async () => (await window.attaClip.state()).clips[0]?.shareables.length), { timeout: 90000 }).toBe(1);
@@ -153,6 +158,8 @@ try {
             windowCaptureTested: true,
             hiddenRecordingTested: true,
             repeatedSavesThroughStopTested: true,
+            everyDecodedFrameMatchedFixture: true,
+            changingFixtureColorsTested: true,
             originalPreserved: true,
             oneMBShareableTested: true,
             fixtureAudioStarted: identity.audioStarted,

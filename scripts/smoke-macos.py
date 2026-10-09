@@ -58,13 +58,17 @@ def validate(file, audio_expected):
     audio = [stream for stream in info["streams"] if stream["codec_type"] == "audio"]
     assert len(audio) == 2, audio
     subprocess.run([ffmpeg, "-v", "error", "-i", str(file), "-map", "0", "-f", "null", "-"], check=True)
-    pixels = []
-    for position in (0.1, 0.4, 0.7, 1.1):
-        pixel = subprocess.run([ffmpeg, "-v", "error", "-ss", str(position), "-i", str(file), "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
-        assert len(pixel) == 3, pixel
-        assert any(all(abs(pixel[i] - color[i]) <= 22 for i in range(3)) for color in ((228, 76, 102), (65, 184, 170))), pixel
-        pixels.append(list(pixel))
-    assert len(set(tuple(pixel) for pixel in pixels)) > 1, "Saved capture did not contain changing fixture frames"
+    # Classify every decoded frame. Sparse seek samples can alias with a periodic
+    # fixture, and compression noise in one color is not proof of real motion.
+    raw = subprocess.run([ffmpeg, "-v", "error", "-i", str(file), "-vf", "crop=2:2:iw/2:ih/2,scale=1:1", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    assert len(raw) >= 6 and len(raw) % 3 == 0, "No complete decoded frames"
+    pixels = [list(raw[index:index + 3]) for index in range(0, len(raw), 3)]
+    colors = ((228, 76, 102), (65, 184, 170))
+    classes = [next((index for index, color in enumerate(colors) if all(abs(pixel[channel] - color[channel]) <= 22 for channel in range(3))), None) for pixel in pixels]
+    diagnostic = dict(pixels=pixels, fixtureColorClasses=classes, duration=float(info["format"]["duration"]))
+    file.with_suffix(".media.json").write_text(json.dumps(diagnostic, indent=2))
+    assert None not in classes, "Saved frames did not match the selected fixture"
+    assert set(classes) == {0, 1}, "Saved capture did not contain both changing fixture colors"
     levels = []
     for track in range(2):
         result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(file), "-map", f"0:a:{track}", "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True, check=True)
@@ -74,7 +78,9 @@ def validate(file, audio_expected):
         if audio_expected:
             assert level > -55, f"No generated application audio on track {track}: {level} dB"
         levels.append(level)
-    return dict(path=str(file.relative_to(root)), pixels=pixels, audioMeanDB=levels, duration=float(info["format"]["duration"]))
+    diagnostic["audioMeanDB"] = levels
+    file.with_suffix(".media.json").write_text(json.dumps(diagnostic, indent=2))
+    return dict(path=str(file.relative_to(root)), **diagnostic)
 
 try:
     fixture_contents = folder / "Fixture.app" / "Contents"
