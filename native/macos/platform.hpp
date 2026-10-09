@@ -19,6 +19,10 @@ std::string captureError();
 nlohmann::json candidates();
 bool foregroundFullscreen();
 void requireMicrophonePermission();
+obs_source_t *createApplicationAudio(uintptr_t window, int64_t pid, const std::string &name);
+obs_source_t *createSystemAudio(const std::string &name);
+std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid);
+nlohmann::json outputDevices();
 std::vector<std::string> hardwareEncoders();
 std::string hardwareEncoder(obs_data_t *settings, int cq, int width, int height,
                             int fps);

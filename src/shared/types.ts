@@ -15,6 +15,8 @@ export interface GameCandidate {
    foreground: boolean;
    fullscreen: boolean;
    arguments?: string;
+   runtime?: "wine";
+   runtimeExecutable?: string;
    gameName?: string;
 }
 export interface CustomGame {

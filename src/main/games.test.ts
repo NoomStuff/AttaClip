@@ -62,4 +62,25 @@ describe("automatic game selection", () => {
       expect(() => parseCatalog({})).toThrow();
       expect(() => parseCatalog([{ id: "bad", name: "Bad", executables: [{ name: "exe" }] }])).toThrow();
    });
+   test("matches Windows catalog entries only for verified Wine candidates on Linux", async () => {
+      const file = join(await mkdtemp(join(tmpdir(), "attaclip-wine-games-")), "catalog.json");
+      await writeFile(
+         file,
+         JSON.stringify({
+            updated: Date.now(),
+            entries: [
+               { id: "windows-game", name: "Windows demo", executables: [{ name: "demo/game.exe", os: "win32" }] },
+               { id: "native-game", name: "Native demo", executables: [{ name: "demo/game.exe", os: "linux" }] },
+               { id: "wine-loader", name: "Loader", executables: [{ name: "wine64", os: "linux", is_launcher: true }] },
+            ],
+         })
+      );
+      const catalog = new GameCatalog(file, undefined, "linux");
+      await catalog.load();
+      expect(
+         catalog.match([candidate("wine", { executable: "/games/demo/game.exe", runtime: "wine", runtimeExecutable: "/usr/bin/wine64" })], [])[0]?.gameName
+      ).toBe("Windows demo");
+      expect(catalog.match([candidate("native", { executable: "/games/demo/game.exe" })], [])[0]?.gameName).toBe("Native demo");
+      expect(catalog.match([candidate("loader", { executable: "/usr/bin/wine64", arguments: "/games/demo/game.exe" })], [])).toEqual([]);
+   });
 });

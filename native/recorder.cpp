@@ -24,6 +24,7 @@
 #endif
 #ifdef __linux__
 #include "linux-app-audio.hpp"
+#include "linux-process.hpp"
 #include "x11-compat.hpp"
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
@@ -74,11 +75,11 @@ std::string windowText(xcb_window_t window, const char *name) {
   return std::string(bytes.begin(), end);
 }
 bool x11Available(uintptr_t window, uint32_t pid, bool requireVisible = true) {
+  std::lock_guard<std::mutex> lock(xcbMutex);
+  if (!candidateConnection || xcb_connection_has_error(candidateConnection))
+    return false;
   if (!window)
     return true;
-  std::lock_guard<std::mutex> lock(xcbMutex);
-  if (!candidateConnection)
-    return false;
   auto *reply = xcb_get_window_attributes_reply(
       candidateConnection,
       xcb_get_window_attributes(candidateConnection, uint32_t(window)),
@@ -93,7 +94,8 @@ bool x11Available(uintptr_t window, uint32_t pid, bool requireVisible = true) {
 nlohmann::json captureCandidates() {
   std::lock_guard<std::mutex> lock(xcbMutex);
   nlohmann::json result = nlohmann::json::array();
-  if (!candidateConnection)
+  if (!candidateConnection || xcb_connection_has_error(candidateConnection) ||
+      !xcb_get_setup(candidateConnection))
     return result;
   auto roots = xcb_setup_roots_iterator(xcb_get_setup(candidateConnection));
   for (; roots.rem; xcb_screen_next(&roots)) {
@@ -147,12 +149,19 @@ nlohmann::json captureCandidates() {
                         geometry->height >= screen->height_in_pixels;
       free(geometry);
       free(position);
-      result.push_back({{"id", "window:" + std::to_string(window) + ":0"},
-                        {"name", name},
-                        {"executable", executable.string()},
-                        {"pid", pid},
-                        {"foreground", foreground == window},
-                        {"fullscreen", fullscreen}});
+      nlohmann::json candidate = {
+          {"id", "window:" + std::to_string(window) + ":0"},
+          {"name", name},
+          {"executable", executable.string()},
+          {"pid", pid},
+          {"foreground", foreground == window},
+          {"fullscreen", fullscreen}};
+      if (auto image = wineProcessImage(pid, executable)) {
+        candidate["executable"] = image->executable.string();
+        candidate["runtime"] = "wine";
+        candidate["runtimeExecutable"] = image->runtimeExecutable.string();
+      }
+      result.push_back(std::move(candidate));
     }
   }
   return result;
@@ -395,6 +404,10 @@ public:
   std::thread writer;
   bool quitting = false;
   bool captureInterrupted = false;
+  bool deliveryInterrupted = false;
+  uint64_t lastVideoDelivery = 0;
+  int64_t lastVideoWallTime = 0;
+  int64_t recoveryBoundary = 0;
   std::atomic<bool> active{false};
   std::atomic<int> pending{0};
   std::atomic<uintptr_t> targetWindow{0};
@@ -415,6 +428,10 @@ public:
   bool captureMuted = false, microphoneMuted = false,
        captureAudioEnabled = true;
   std::atomic<bool> screenCapture{true};
+  std::mutex displayIdentityMutex;
+  std::string selectedDisplayIdentity;
+  uint64_t displayIdentityChecked = 0;
+  bool displayIdentityAvailable = true;
   size_t bytes = 0;
   int seconds = 60, width = 1920, height = 1080, fps = 60;
   int64_t previousEnd = 0;
@@ -544,6 +561,10 @@ public:
       ring.clear();
       bytes = 0;
       captureInterrupted = false;
+      deliveryInterrupted = false;
+      lastVideoDelivery = 0;
+      lastVideoWallTime = 0;
+      recoveryBoundary = 0;
     }
     release();
     idleVideo();
@@ -556,6 +577,44 @@ public:
     if (gameCapture && !gameReady)
       return false;
 #ifdef _WIN32
+    if (screenCapture) {
+      std::lock_guard<std::mutex> lock(displayIdentityMutex);
+      if (!selectedDisplayIdentity.empty()) {
+        uint64_t now = os_gettime_ns();
+        if (now - displayIdentityChecked < 200000000)
+          return displayIdentityAvailable;
+        struct Match {
+          const std::string *wanted;
+          bool found = false;
+        } match{&selectedDisplayIdentity};
+        EnumDisplayMonitors(
+            nullptr, nullptr,
+            [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+              auto *match = reinterpret_cast<Match *>(data);
+              MONITORINFOEXA info{};
+              info.cbSize = sizeof(info);
+              if (GetMonitorInfoA(monitor, &info)) {
+                DISPLAY_DEVICEA device{};
+                device.cb = sizeof(device);
+                std::string identity =
+                    EnumDisplayDevicesA(info.szDevice, 0, &device,
+                                        EDD_GET_DEVICE_INTERFACE_NAME)
+                        ? device.DeviceID
+                        : info.szDevice;
+                if (identity == *match->wanted) {
+                  match->found = true;
+                  return FALSE;
+                }
+              }
+              return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&match));
+        displayIdentityChecked = now;
+        displayIdentityAvailable = match.found;
+        if (!displayIdentityAvailable)
+          return false;
+      }
+    }
     HWND window = reinterpret_cast<HWND>(targetWindow.load());
     if (window &&
         (!IsWindow(window) || IsIconic(window) || !IsWindowVisible(window)))
@@ -889,15 +948,23 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
+    checkDeliveryGap();
+    if (p->type == OBS_ENCODER_VIDEO) {
+      lastVideoDelivery = os_gettime_ns();
+      lastVideoWallTime = wallTime();
+    }
     if (captureInterrupted) {
       // Keep earlier footage available until recovery produces a decodable
       // keyframe. Never join the absent interval into a seemingly continuous
       // clip.
-      if (p->type != OBS_ENCODER_VIDEO || !p->keyframe)
+      if (p->type != OBS_ENCODER_VIDEO || !p->keyframe ||
+          p->sys_dts_usec < recoveryBoundary)
         return;
       ring.clear();
       bytes = 0;
       captureInterrupted = false;
+      deliveryInterrupted = false;
+      recoveryBoundary = 0;
     }
     ring.emplace_back(*p);
     bytes += p->size;
@@ -930,6 +997,29 @@ public:
       snapshot(requests.front());
       requests.pop_front();
     }
+  }
+  static int64_t wallTime() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+  }
+  // Caller holds mutex. A frozen process or suspended computer can retain a
+  // valid texture while its encoded timestamps jump. Preserve accepted saves
+  // before waiting for a fresh keyframe instead of joining that gap.
+  void checkDeliveryGap() {
+    if (!active || !lastVideoDelivery || captureInterrupted)
+      return;
+    uint64_t threshold =
+        std::max(uint64_t(2000000000), uint64_t(3000000000) / uint64_t(fps));
+    if (os_gettime_ns() - lastVideoDelivery <= threshold &&
+        wallTime() - lastVideoWallTime <= int64_t(threshold / 1000000))
+      return;
+    captureInterrupted = true;
+    deliveryInterrupted = true;
+    recoveryBoundary = int64_t(os_gettime_ns() / 1000);
+    for (auto &request : requests)
+      snapshot(request);
+    requests.clear();
   }
   void snapshot(const Request &r) {
     int64_t end = r.end;
@@ -987,6 +1077,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex);
     if (!active)
       throw std::runtime_error("Start recording before saving a clip");
+    checkDeliveryGap();
     if (pending >= 3)
       throw std::runtime_error(
           "Three clips are already saving. Wait for a save to finish");
@@ -1199,6 +1290,7 @@ public:
     auto *s = sourceSettings.get();
     obs_source_t *next = nullptr;
     bool compatibility = false;
+    std::string nextDisplayIdentity;
 #ifdef _WIN32
     if (kind == "screen") {
       auto *props = obs_get_source_properties("monitor_capture");
@@ -1253,6 +1345,7 @@ public:
       if (monitor.empty())
         throw std::runtime_error("The selected screen is unavailable");
       obs_data_set_string(s, "monitor_id", monitor.c_str());
+      nextDisplayIdentity = monitor;
       obs_data_set_bool(s, "capture_cursor", true);
       obs_data_set_bool(s, "force_sdr", true);
       next = createCaptureSource("monitor_capture", s);
@@ -1492,6 +1585,11 @@ public:
 #endif
     targetWindow = target;
     targetProcess = targetPid;
+    {
+      std::lock_guard<std::mutex> lock(displayIdentityMutex);
+      selectedDisplayIdentity = std::move(nextDisplayIdentity);
+      displayIdentityChecked = 0;
+    }
     windowCompatibility = compatibility;
 #ifdef _WIN32
     gameCapture = std::string(obs_source_get_id(next)) == "game_capture";
@@ -1923,6 +2021,7 @@ int main(int argc, char **argv) {
           } else if (action == "status") {
             r.refreshCapture();
             std::lock_guard<std::mutex> lock(r.mutex);
+            r.checkDeliveryGap();
             double available = r.ring.empty()
                                    ? 0
                                    : (r.ring.back().p.sys_dts_usec -
@@ -1955,6 +2054,11 @@ int main(int argc, char **argv) {
 #endif
             if (captureError.empty())
               captureError = r.additionalAudioError();
+            if (captureError.empty() && r.deliveryInterrupted)
+              captureError = "Waiting for recording to resume";
+            if (captureError.empty() && r.active && r.screenCapture &&
+                !r.targetAvailable())
+              captureError = "The selected screen is unavailable";
             emit({{"event", "status"},
                   {"fullscreen", fullscreen},
                   {"active", r.active.load()},

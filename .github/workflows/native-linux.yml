@@ -21,7 +21,7 @@ jobs:
            run: |
               sudo add-apt-repository -y ppa:obsproject/obs-studio
               sudo apt-get update
-              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libxcb-composite0-dev libpulse-dev libsimde-dev xvfb openbox x11-apps x11-xserver-utils ffmpeg pulseaudio pulseaudio-utils
+              sudo apt-get install -y obs-studio=32.2.0-0obsproject1~noble cmake g++ make pkg-config libx11-dev libxcb-composite0-dev libpulse-dev libsimde-dev xvfb openbox x11-apps x11-xserver-utils ffmpeg pulseaudio pulseaudio-utils gcc-mingw-w64-x86-64 wine64
          - name: Build native X11 recorder
            run: bun scripts/build-native-linux.ts
          - name: Build isolated application audio fixtures
@@ -30,6 +30,10 @@ jobs:
               cmake --build .cache/native-tests-linux -j2
          - name: Verify selected application audio isolation and recovery
            run: python3 scripts/smoke-linux-app-audio.py resources/recorder
+         - name: Verify real Wine image identity and application capture
+           run: python3 scripts/smoke-wine.py resources/recorder
+         - name: Verify accepted saves and capture after process interruption
+           run: python3 scripts/smoke-interruption.py resources/recorder
          - name: Record actual screen and audio
            run: python3 scripts/smoke-linux.py resources/recorder
            env:
@@ -52,6 +56,8 @@ jobs:
               name: linux-capture-evidence
               path: |
                  .cache/linux-smoke/**/measurements.json
+                 .cache/linux-smoke/**/wine-proof.json
+                 .cache/linux-smoke/**/interruption-proof.json
                  .cache/linux-smoke/**/events.json
                  .cache/linux-smoke/**/*.log
                  .cache/linux-packaged/**/report.json

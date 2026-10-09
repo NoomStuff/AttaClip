@@ -11,6 +11,14 @@ elseif(UNIX AND NOT APPLE)
   add_executable(attaclip-x11-audio-fixture x11-audio.cpp)
   target_compile_features(attaclip-x11-audio-fixture PRIVATE cxx_std_17)
   target_link_libraries(attaclip-x11-audio-fixture PRIVATE X11::X11 PkgConfig::PULSE_SIMPLE)
+  find_program(MINGW_C_COMPILER x86_64-w64-mingw32-gcc)
+  if(MINGW_C_COMPILER)
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/AttaClipWineGame.exe"
+      COMMAND "${MINGW_C_COMPILER}" -O2 -static "${CMAKE_CURRENT_SOURCE_DIR}/wine-window.c"
+        -o "${CMAKE_CURRENT_BINARY_DIR}/AttaClipWineGame.exe" -luser32 -lgdi32
+      DEPENDS wine-window.c VERBATIM)
+    add_custom_target(attaclip-wine-fixture ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/AttaClipWineGame.exe")
+  endif()
 else()
   message(FATAL_ERROR "No native fixture for this platform")
 endif()

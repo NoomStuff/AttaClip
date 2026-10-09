@@ -35,6 +35,15 @@ const electronSchema = z.object({
    licenseFiles: z.array(fileSchema).min(1),
    buildInstructions: z.array(fileSchema).min(1),
 });
+const toolsetSchema = z.object({
+   toolset: fileSchema,
+   runtime: fileSchema,
+   packages: z.array(z.object({ binaryArchive: fileSchema, sourceArchives: z.array(sourceSchema).min(1), copyright: fileSchema, file: fileSchema })).length(6),
+   sources: z.array(sourceSchema).min(4),
+   licenseFiles: z.array(fileSchema).min(1),
+   buildInstructions: z.array(fileSchema).min(1),
+   blockers: z.array(z.string()),
+});
 
 export interface LinuxSourceKit {
    version: 1;
@@ -45,6 +54,7 @@ export interface LinuxSourceKit {
    applicationSource: FileRecord;
    sourcePackageCounts: { native: number; static: number };
    nativeElfPaths: string[];
+   appimage: { runtime: FileRecord; libraries: FileRecord[] };
 }
 
 const kitSchema = z.object({
@@ -56,6 +66,7 @@ const kitSchema = z.object({
    applicationSource: fileSchema,
    sourcePackageCounts: z.object({ native: z.number().int().positive(), static: z.number().int().positive() }),
    nativeElfPaths: z.array(z.string()).min(1),
+   appimage: z.object({ runtime: fileSchema, libraries: z.array(fileSchema).length(6) }),
 });
 
 export async function verifyPacketFiles(directory: string, files: FileRecord[]): Promise<void> {
@@ -104,7 +115,7 @@ export async function collectLinuxSourceFiles(
    project: string,
    stage: string,
    directory: string
-): Promise<{ files: FileRecord[]; nativeCount: number; staticCount: number }> {
+): Promise<{ files: FileRecord[]; nativeCount: number; staticCount: number; appimage: LinuxSourceKit["appimage"] }> {
    linuxPython(project, "scripts/collect-linux-sources.py", [
       "--stage",
       linuxPath(path.join(stage, "resources/recorder")),
@@ -113,6 +124,7 @@ export async function collectLinuxSourceFiles(
       "--check",
    ]);
    linuxPython(project, "scripts/linux-source-inputs.py", ["--sources", linuxPath(directory)]);
+   linuxPython(project, "scripts/collect-appimage-sources.py", ["--output", linuxPath(path.join(directory, "toolset")), "--check"]);
    const files = new Map<string, FileRecord>();
    const record = async (relative: string, expected?: string): Promise<void> => {
       const absolute = packetPath(directory, relative);
@@ -202,7 +214,25 @@ export async function collectLinuxSourceFiles(
    await mkdir(path.join(directory, "evidence"), { recursive: true });
    await copyFile(path.join(stage, "resources/recorder/provenance.json"), packetPath(directory, nativeRecord));
    await record(nativeRecord);
-   return { files: [...files.values()].sort((a, b) => a.path.localeCompare(b.path)), nativeCount: native.packages.length, staticCount };
+   const toolset = toolsetSchema.parse(JSON.parse(await readFile(path.join(directory, "toolset/manifest.json"), "utf8")));
+   if (toolset.blockers.length) throw new Error("AppImage launcher/library source evidence is incomplete");
+   await record("toolset/manifest.json");
+   for (const file of [
+      toolset.toolset,
+      toolset.runtime,
+      ...toolset.sources,
+      ...toolset.licenseFiles,
+      ...toolset.buildInstructions,
+      ...toolset.packages.flatMap((component) => [component.binaryArchive, component.copyright, ...component.sourceArchives]),
+   ])
+      await record(`toolset/${file.path}`, file.sha256);
+   for (const file of await inventory(path.join(directory, "toolset/history"), "toolset/history")) await record(file.path, file.sha256);
+   return {
+      files: [...files.values()].sort((a, b) => a.path.localeCompare(b.path)),
+      nativeCount: native.packages.length,
+      staticCount,
+      appimage: { runtime: toolset.runtime, libraries: toolset.packages.map((component) => component.file) },
+   };
 }
 
 export async function stageLinuxSourceNotices(project: string, stage: string): Promise<number> {
@@ -219,14 +249,25 @@ export async function stageLinuxSourceNotices(project: string, stage: string): P
       await mkdir(path.dirname(target), { recursive: true });
       await copyFile(packetPath(root, file.path), target);
    }
-   return unique.length;
+   const toolsetRoot = path.join(project, "work/linux-release-sources/toolset");
+   const toolset = toolsetSchema.parse(JSON.parse(await readFile(path.join(toolsetRoot, "manifest.json"), "utf8")));
+   const packagerNotices = [...new Map(toolset.licenseFiles.map((file) => [file.path, file])).values()];
+   await verifyPacketFiles(toolsetRoot, packagerNotices);
+   const targetRoot = path.join(stage, "resources/notices/appimage");
+   for (const file of packagerNotices) {
+      const target = packetPath(targetRoot, file.path);
+      await mkdir(path.dirname(target), { recursive: true });
+      await copyFile(packetPath(toolsetRoot, file.path), target);
+   }
+   await writeFile(path.join(targetRoot, "manifest.json"), `${JSON.stringify({ licenses: toolset.licenseFiles }, null, 2)}\n`);
+   return unique.length + packagerNotices.length;
 }
 
 export async function assembleLinuxSourceKit(project: string, stage: string, directory: string): Promise<LinuxSourceKit> {
    if (execFileSync("git", ["status", "--porcelain"], { cwd: project, encoding: "utf8", windowsHide: true }).trim())
       throw new Error("Commit the final source before assembling its Linux packet");
    const appCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8", windowsHide: true }).trim();
-   const { files, nativeCount, staticCount } = await collectLinuxSourceFiles(project, stage, directory);
+   const { files, nativeCount, staticCount, appimage } = await collectLinuxSourceFiles(project, stage, directory);
    const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: project, encoding: "utf8", windowsHide: true }).split("\0").filter(Boolean);
    for (const relative of tracked.filter(
       (file) => file.startsWith("src/") || ["package.json", "bun.lock", "electron.vite.config.ts", "tsconfig.json"].includes(file)
@@ -270,6 +311,7 @@ export async function assembleLinuxSourceKit(project: string, stage: string, dir
       applicationSource,
       sourcePackageCounts: { native: nativeCount, static: staticCount },
       nativeElfPaths,
+      appimage,
    };
    await writeFile(path.join(directory, "linux-kit.json"), `${JSON.stringify(kit, null, 2)}\n`);
    return kit;
@@ -292,6 +334,24 @@ export async function validateLinuxSourceKit(project: string, directory: string)
          throw new Error(`Source packet omits required evidence: ${file.path}`);
    };
    requireFile(kit.applicationSource);
+   const toolset = toolsetSchema.parse(JSON.parse(await readFile(path.join(directory, "toolset/manifest.json"), "utf8")));
+   if (toolset.blockers.length) throw new Error("AppImage toolset source has unresolved components");
+   for (const file of [
+      toolset.toolset,
+      toolset.runtime,
+      ...toolset.sources,
+      ...toolset.licenseFiles,
+      ...toolset.buildInstructions,
+      ...toolset.packages.flatMap((component) => [component.binaryArchive, component.copyright, ...component.sourceArchives]),
+   ])
+      requireFile({ ...file, path: `toolset/${file.path}` });
+   if (JSON.stringify(kit.appimage) !== JSON.stringify({ runtime: toolset.runtime, libraries: toolset.packages.map((component) => component.file) }))
+      throw new Error("AppImage packaging inventory differs from its checked exact source toolset");
+   for (const notice of toolset.licenseFiles) {
+      const staged = kit.staged.find((file) => file.path === `resources/notices/appimage/${notice.path}`);
+      if (!staged || staged.sha256 !== notice.sha256 || staged.size !== notice.size)
+         throw new Error("Packaged launcher or injected library is missing its full notice");
+   }
    for (const name of [
       "manifest.json",
       "static-input-verification.json",
@@ -377,6 +437,7 @@ export async function validateLinuxSourceKit(project: string, directory: string)
       "--check",
    ]);
    linuxPython(project, "scripts/linux-source-inputs.py", ["--sources", linuxPath(directory), "--no-write"]);
+   linuxPython(project, "scripts/collect-appimage-sources.py", ["--output", linuxPath(path.join(directory, "toolset")), "--check"]);
    return kit;
 }
 

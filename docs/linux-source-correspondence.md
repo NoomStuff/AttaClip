@@ -10,7 +10,7 @@ Static inputs need separate checks because an ELF dependency list misses embedde
 
 `scripts/linux-source-inputs.py` compares selected packages with actual build-info versions, official publication/build identities and each source `.dsc`. It checked 855 unique static source archives. Notice extraction produced 3412 references to 1467 distinct full texts. All 17 referenced common-license texts match bytes in their owning official package.
 
-The combined source input inventory contains 5374 files and 1.34 GB before the application archive. These checks ran against actual files. No source packet or public AppImage has passed the final release gate yet.
+Before the AppImage toolset was added, the combined source input inventory contained 5374 files and 1.34 GB. These checks ran against actual files. The full source ZIP and public AppImage still need the final frozen release check.
 
 ## Package evidence
 
@@ -59,28 +59,51 @@ bun scripts/linux-source-kit.ts --check
 bun scripts/package-linux-source-kit.ts
 ```
 
-The notice command writes only the Linux snapshot's `resources/notices/ubuntu`. Run it before packaging the app. The source checker independently checks archive hashes, exact package/source identities, static inputs, Electron and CLI hashes, native source fingerprints and the full runtime notice inventory. `--inputs-only` checks and copies dependency evidence without pretending that application source is frozen.
+The notice command writes the Linux snapshot's `resources/notices/ubuntu` and `resources/notices/appimage`. It staged 1495 distinct full notice files. Run it before packaging the app. The source checker independently checks archive hashes, exact package/source identities, static inputs, Electron and CLI hashes, native source fingerprints and the full runtime notice inventory. `--inputs-only` checks and copies dependency evidence without pretending that application source is frozen.
 
 The ZIP packager includes exactly the referenced files. Its verifier rejects altered bytes, omitted or unexpected members, links, duplicate paths and traversal. The ZIP companion records the application commit, source ZIP digest/size and staged inventory. Extract the ZIP into an empty directory to run offline checks. The application archive retains build scripts and the lockfile. `README.txt` in the packet describes restoration and rebuild commands.
 
-## The remaining AppImage packaging gap
+## AppImage launcher and injected libraries
 
 `verify-linux-payload.ts` passed 683 payload checks on the earlier private AppImage. It compared the compiled app.asar, staged recorder/media/notices, official Electron files and controlled CLI evidence. Altering a media license caused rejection. Those results establish the checked payload, not the entire AppImage container.
 
-Electron-builder's legacy toolset adds six libraries outside that inventory, under `usr/lib`:
+Electron-builder's legacy toolset adds six libraries under `usr/lib`. The new source collector matched each to its exact official Ubuntu package member:
 
-- `libappindicator.so.1`
-- `libgconf-2.so.4`
-- `libindicator.so.7`
-- `libnotify.so.4`
-- `libXss.so.1`
-- `libXtst.so.6`
+- `libappindicator.so.1`, `libappindicator1=12.10.1+13.10.20130920-0ubuntu4`
+- `libgconf-2.so.4`, `libgconf-2-4=3.2.6-0ubuntu2`
+- `libindicator.so.7`, `libindicator7=12.10.2+14.04.20140402-0ubuntu1`
+- `libnotify.so.4`, `libnotify4=0.7.6-1ubuntu3`
+- `libXss.so.1`, `libxss1=1:1.2.2-1`
+- `libXtst.so.6`, `libxtst6=2:1.2.2-1`
 
-The actual private image contains all six. They come from `appimage-12.0.1.7z`, whose pinned SHA-256 is `d12ff7eb8f1d1ec4652ca5237a7fbdca33acc0c758045636feca62dc6ecb8ec4`. Its exact packager tag points to commit `57839c6516289c0412c1b0887a6718d71e1ac5c2` in electron-userland/electron-builder-binaries. The launcher embeds squashfuse0.1.100 and liblzma5.2.3 according to its binary strings. This is a version observation, not proof of complete source correspondence.
+They come from `appimage-12.0.1.7z`, whose pinned SHA-256 is `d12ff7eb8f1d1ec4652ca5237a7fbdca33acc0c758045636feca62dc6ecb8ec4`. Its exact packager tag points to commit `57839c6516289c0412c1b0887a6718d71e1ac5c2` in electron-userland/electron-builder-binaries. The collector checks every cached binary against that archive, then captures the official binary/source publication, build records, exact `.dsc` inputs and package copyright. Historical Ubuntu versions remain exact. A current package with the same name cannot substitute for them.
 
-The [AppImageKit runtime source](https://github.com/AppImage/AppImageKit/blob/master/src/runtime.c) has an MIT notice. Do not invent a GPL source requirement for that runtime. Its included code still needs the correct notices. The six injected Ubuntu libraries need actual byte/source/license proof, or packaging must stop including them. Choosing a newer toolset does not clear its contents automatically.
+The checked official launcher reports AppImageKit commit `effcebc1d81c5e174a48b870cb420f490fb5fb4d`. Its immutable Git tree pins libappimage `13f401a4a384ec59ec9a144e2a7006adf751571f`. The captured dependency recipe pins squashfuse `1f980303b89c779eabfd0a0fdd36d6a7a311bf92` and the SHA-512 of xz5.2.3. The packet retains all four complete source archives and required build recipes. Git source verification hashes each archive member back to its blob, reconstructs every tree and checks the raw commit object against the pinned commit. Rewriting a manifest digest cannot adopt different code.
 
-Before any public AppImage, complete that toolset review, capture full notices and account for every extra file. The final artifact check must freshly extract the actual AppImage, bind its container hash to the source ZIP companion, verify launcher bytes and `usr/lib`, rebuild the archived application and compare the resulting app.asar. An old ignored `out/` directory must not pass merely because Git is clean. Current source packet tooling intentionally covers the staged payload and does not claim this final AppImage check is complete.
+AppImageKit's runtime file and libappimage have MIT notices. Included code has its own obligations. For example, libappimage's `light_elf.h` retains a GPL2 kernel header notice. The packet includes that full file, the full GPL2 text, squashfuse notices and xz notices. It does not relabel the combined launcher as purely MIT.
+
+The source collector and offline checker passed with six library packages, four launcher source archives and 29 notice references. Those references identify 28 distinct notice files. Actual private AppImage bytes passed both the launcher-prefix comparison and all six library comparisons. The final release must still run the complete source ZIP and container check after a clean freeze.
+
+```sh
+python3 scripts/collect-appimage-sources.py \
+  --output work/linux-release-sources/toolset \
+  --toolset /path/to/electron-builder/appimage-12.0.1/extracted \
+  --archive /path/to/electron-builder/appimage-12.0.1/appimage-12.0.1.7z
+python3 scripts/collect-appimage-sources.py \
+  --output work/linux-release-sources/toolset --check
+python3 scripts/collect-appimage-sources.test.py
+```
+
+After packaging, run on Linux or WSL:
+
+```sh
+bun scripts/verify-linux-release.ts \
+  /path/to/clean/AttaClip /path/to/frozen/linux-build \
+  /path/to/AttaClip-linux-sources.zip /path/to/AttaClip.AppImage \
+  /path/to/work/linux-release-sources
+```
+
+The verifier validates and extracts the source ZIP, compares its application archive with the frozen Git commit, rebuilds the matching application source and compares the resulting `out/` and app.asar. It checks the exact launcher before invoking extraction mode, verifies all six added libraries and checks AppRun against the locked builder's generated script. It rejects additional ELF files and allows only the two known relative icon links. The report binds the actual container SHA-256, source ZIP SHA-256, staged files and application commit. A clean Git checkout alone cannot approve an old ignored build.
 
 ## macOS follow-up
 

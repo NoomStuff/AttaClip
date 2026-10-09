@@ -69,6 +69,8 @@ const sourceFiles = [
    "native/x11-compat.hpp",
    "native/linux-app-audio.cpp",
    "native/linux-app-audio.hpp",
+   "native/linux-process.cpp",
+   "native/linux-process.hpp",
    "native/CMakeLists.txt",
    "scripts/build-native-linux.ts",
 ];

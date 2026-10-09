@@ -31,6 +31,9 @@ bool checkedAvailable = false;
 struct CaptureHealth { std::atomic<bool> failed{false}; };
 std::vector<std::unique_ptr<CaptureHealth>> sourceHealth;
 std::atomic<CaptureHealth *> currentHealth{nullptr};
+struct AudioTarget { CGWindowID window; pid_t pid; std::string bundle; };
+std::unordered_map<obs_source_t *, CaptureHealth *> audioHealth;
+std::unordered_map<obs_source_t *, AudioTarget> audioTargets;
 
 std::string text(CFStringRef value) {
   if (!value) return {};
@@ -51,7 +54,7 @@ uint32_t sourceNumber(const std::string &id, const std::string &prefix) {
   return uint32_t(value);
 }
 
-bool availableWindow(CGWindowID id, pid_t expectedOwner = 0, pid_t *owner = nullptr) {
+bool availableWindow(CGWindowID id, pid_t expectedOwner = 0, pid_t *owner = nullptr, bool requireOnscreen = true) {
   if (!id) return false;
   CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id);
   bool available = false;
@@ -64,7 +67,7 @@ bool availableWindow(CGWindowID id, pid_t expectedOwner = 0, pid_t *owner = null
     if (number) CFNumberGetValue(number, kCFNumberSInt32Type, &candidate);
     auto process = static_cast<CFNumberRef>(CFDictionaryGetValue(entry, kCGWindowOwnerPID));
     if (process) CFNumberGetValue(process, kCFNumberSInt32Type, &pid);
-    if (candidate == id && onscreen == kCFBooleanTrue && (!expectedOwner || expectedOwner == pid)) {
+    if (candidate == id && (!requireOnscreen || onscreen == kCFBooleanTrue) && (!expectedOwner || expectedOwner == pid)) {
       available = true;
       if (owner) *owner = pid;
     }
@@ -264,6 +267,92 @@ bool foregroundFullscreen() {
 void requireMicrophonePermission() {
   if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] != AVAuthorizationStatusAuthorized)
     throw std::runtime_error("Allow AttaClip microphone access in System Settings before recording your microphone");
+}
+
+namespace {
+obs_source_t *audioSource(obs_data_t *settings, const std::string &name) {
+  if (!CGPreflightScreenCaptureAccess()) {
+    obs_data_release(settings);
+    throw std::runtime_error("Allow AttaClip in System Settings, Privacy & Security, Screen Recording, then reopen the app");
+  }
+  auto *source = obs_source_create_private("sck_audio_capture", name.c_str(), settings);
+  obs_data_release(settings);
+  if (!source) throw std::runtime_error("ScreenCaptureKit could not open the selected audio source");
+  auto health = std::make_unique<CaptureHealth>();
+  auto *state = health.get();
+  signal_handler_connect(obs_source_get_signal_handler(source), "update_properties",
+      [](void *value, calldata_t *) { static_cast<CaptureHealth *>(value)->failed = true; }, state);
+  sourceHealth.push_back(std::move(health));
+  std::lock_guard<std::mutex> lock(availabilityMutex);
+  audioHealth[source] = state;
+  return source;
+}
+
+std::string applicationBundle(CGWindowID window, pid_t pid) {
+  if (!pid || !availableWindow(window, pid, nullptr, false))
+    throw std::runtime_error("The application audio target changed");
+  NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  NSString *bundle = application.bundleIdentifier;
+  if (!bundle.length || application.terminated)
+    throw std::runtime_error("This application cannot be identified for separate audio capture");
+  unsigned matching = 0;
+  for (NSRunningApplication *candidate in NSWorkspace.sharedWorkspace.runningApplications)
+    if (!candidate.terminated && [candidate.bundleIdentifier isEqualToString:bundle]) ++matching;
+  // The official audio source selects a bundle, not a PID. Never widen an
+  // exact process choice to another independently running instance.
+  if (matching != 1)
+    throw std::runtime_error("Multiple instances of this application are running. Close the other instances before capturing its audio");
+  return bundle.UTF8String;
+}
+}
+
+obs_source_t *createApplicationAudio(uintptr_t window, int64_t pid, const std::string &name) {
+  if (window > UINT32_MAX || pid <= 0 || pid > INT32_MAX)
+    throw std::runtime_error("The application audio target is invalid");
+  const auto bundle = applicationBundle(CGWindowID(window), pid_t(pid));
+  auto *settings = obs_data_create();
+  obs_data_set_int(settings, "type", 1);
+  obs_data_set_string(settings, "application", bundle.c_str());
+  auto *source = audioSource(settings, name);
+  {
+    std::lock_guard<std::mutex> lock(availabilityMutex);
+    audioTargets[source] = {CGWindowID(window), pid_t(pid), bundle};
+  }
+  return source;
+}
+
+obs_source_t *createSystemAudio(const std::string &name) {
+  if (!CGDisplayIsActive(CGMainDisplayID()))
+    throw std::runtime_error("System audio capture needs an active screen");
+  auto *settings = obs_data_create();
+  obs_data_set_int(settings, "type", 0);
+  auto *source = audioSource(settings, name);
+  std::lock_guard<std::mutex> lock(availabilityMutex);
+  audioTargets.erase(source);
+  return source;
+}
+
+std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid) {
+  if (!source) return {};
+  const char *type = obs_source_get_id(source);
+  if (!type || std::string(type) != "sck_audio_capture") return {};
+  std::lock_guard<std::mutex> lock(availabilityMutex);
+  auto health = audioHealth.find(source);
+  if (health != audioHealth.end() && health->second->failed.load()) return "Audio capture stopped. Stop recording and select the source again";
+  if (!CGPreflightScreenCaptureAccess()) return "Screen Recording permission is required for system and application audio";
+  auto target = audioTargets.find(source);
+  if (target != audioTargets.end()) {
+    if (window != target->second.window || pid != target->second.pid) return "The application audio target changed";
+    try {
+      if (applicationBundle(target->second.window, target->second.pid) != target->second.bundle) return "The application audio target changed";
+    } catch (const std::exception &error) { return error.what(); }
+  }
+  return {};
+}
+
+nlohmann::json outputDevices() {
+  // SCK captures the system mix. It does not isolate a physical output device.
+  return nlohmann::json::array({{{"id", "system"}, {"name", "System audio"}}});
 }
 
 std::vector<std::string> hardwareEncoders() {

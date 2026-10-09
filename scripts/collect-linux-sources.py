@@ -79,21 +79,22 @@ def official_json(url):
         return json.load(response)
 
 
-def published_binary(owner, version):
+def published_binary(owner, version, series="noble"):
     archive = "https://api.launchpad.net/1.0/~obsproject/+archive/ubuntu/obs-studio" if owner.split(":", 1)[0] == "obs-studio" else "https://api.launchpad.net/1.0/ubuntu/+archive/primary"
     name = owner.split(":", 1)[0]
     url = archive + "?" + urllib.parse.urlencode({"ws.op": "getPublishedBinaries", "binary_name": name, "version": version, "exact_match": "true"})
     while url:
         collection = official_json(url)
         for record in collection["entries"]:
-            if record["binary_package_name"] == name and record["binary_package_version"] == version and record["distro_arch_series_link"].endswith("/noble/amd64"):
+            if record["binary_package_name"] == name and record["binary_package_version"] == version and record["distro_arch_series_link"].endswith("/amd64") and (series is None or record["distro_arch_series_link"].endswith("/" + series + "/amd64")):
                 return record
         url = collection.get("next_collection_link")
     raise ValueError(f"No official Noble amd64 publication for {owner}={version}")
 
 
-def historical_inputs(root, owner, version):
-    publication = published_binary(owner, version)
+def historical_inputs(root, owner, version, series="noble"):
+    publication = published_binary(owner, version, series)
+    actual_series = publication["distro_arch_series_link"].rsplit("/", 2)[-2]
     source, source_version = publication["source_package_name"], publication["source_package_version"]
     folder = root / "history" / hashlib.sha256(f"{owner}={version}".encode()).hexdigest()[:16]
     folder.mkdir(parents=True, exist_ok=True)
@@ -111,7 +112,7 @@ def historical_inputs(root, owner, version):
     binary_sha, _, binary_file = binary_files[0]
     binary_url = build["changesfile_url"].rsplit("/", 1)[0] + "/" + binary_file
     source_collection = official_json(publication["archive_link"] + "?" + urllib.parse.urlencode({"ws.op": "getPublishedSources", "source_name": source, "version": source_version, "exact_match": "true"}))
-    source_publication = next(record for record in source_collection["entries"] if record["source_package_name"] == source and record["source_package_version"] == source_version and record["distro_series_link"].endswith("/noble"))
+    source_publication = next(record for record in source_collection["entries"] if record["source_package_name"] == source and record["source_package_version"] == source_version and record["distro_series_link"].endswith("/" + actual_series))
     (folder / "source-publication.json").write_text(json.dumps(source_publication, indent=2) + "\n")
     urls_list = official_json(source_publication["self_link"] + "?ws.op=sourceFileUrls")
     urls = {urllib.parse.unquote(url.rsplit("/", 1)[1]): url for url in urls_list}

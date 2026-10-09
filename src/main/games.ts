@@ -56,27 +56,29 @@ export function parseCatalog(input: unknown): GameDefinition[] {
 
 export class GameCatalog {
    private entries = fallback;
-   private index = new Map<string, { game: GameDefinition; suffix: string; arguments?: string }[]>();
+   private index = new Map<string, { game: GameDefinition; suffix: string; os: string; arguments?: string }[]>();
    private loading: Promise<void> | null = null;
    private loaded = false;
    private updated = 0;
    private attempted = 0;
    private readonly file: string;
    private readonly onWarning: (message: string) => void;
-   constructor(file: string, onWarning: (message: string) => void = () => undefined) {
+   private readonly platform: NodeJS.Platform;
+   constructor(file: string, onWarning: (message: string) => void = () => undefined, platform: NodeJS.Platform = process.platform) {
       this.file = file;
       this.onWarning = onWarning;
+      this.platform = platform;
       this.reindex();
    }
    private reindex(): void {
       this.index.clear();
       for (const game of this.entries)
          for (const executable of game.executables) {
-            if (executable.is_launcher || executable.os !== process.platform) continue;
+            if (executable.is_launcher || (executable.os !== this.platform && !(this.platform === "linux" && executable.os === "win32"))) continue;
             const suffix = normalize(executable.name).replace(/^>/, "");
             const base = suffix.split("/").at(-1)!;
             const bucket = this.index.get(base) ?? [];
-            bucket.push({ game, suffix, ...(executable.arguments ? { arguments: executable.arguments } : {}) });
+            bucket.push({ game, suffix, os: executable.os, ...(executable.arguments ? { arguments: executable.arguments } : {}) });
             this.index.set(base, bucket);
          }
    }
@@ -143,7 +145,9 @@ export class GameCatalog {
          const base = executable.split("/").at(-1)!;
          const matches = (this.index.get(base) ?? []).filter(
             (entry) =>
-               (executable === entry.suffix || executable.endsWith(`/${entry.suffix}`)) && (!entry.arguments || candidate.arguments?.includes(entry.arguments))
+               entry.os === (this.platform === "linux" && candidate.runtime === "wine" ? "win32" : this.platform) &&
+               (executable === entry.suffix || executable.endsWith(`/${entry.suffix}`)) &&
+               (!entry.arguments || candidate.arguments?.includes(entry.arguments))
          );
          const ids = new Set(matches.map((entry) => entry.game.id));
          // Ambiguous generic executables must be added explicitly, not guessed.
