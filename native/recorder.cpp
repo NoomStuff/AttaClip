@@ -1408,7 +1408,13 @@ int main(int argc, char **argv) {
     if (!std::filesystem::is_regular_file(disabledUpdater))
       throw std::runtime_error(
           "Could not disable capture compatibility updates");
-    if (!obs_startup("en-US", config.u8string().c_str(), nullptr))
+    if (!
+#ifdef __APPLE__
+        attaclip::macos::startup("en-US", config.u8string().c_str())
+#else
+        obs_startup("en-US", config.u8string().c_str(), nullptr)
+#endif
+    )
       throw std::runtime_error("libOBS initialization failed");
 #ifdef __linux__
     if (!std::getenv("DISPLAY"))

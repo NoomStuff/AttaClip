@@ -30,6 +30,14 @@ jobs:
            run: bun scripts/build-recorder-macos.ts
          - name: Verify actual screen and window recording with generated audio
            run: python3 scripts/smoke-macos.py
+         - name: Record native crash diagnostics
+           if: failure()
+           continue-on-error: true
+           run: |
+              if test -x resources/recorder/attaclip-recorder; then
+                 mkdir -p .cache/macos-native
+                 lldb --batch -o 'process launch -i /dev/null' -o 'thread backtrace all' -- resources/recorder/attaclip-recorder "$PWD/resources/recorder" > .cache/macos-native/crash-backtrace.txt 2>&1
+              fi
          - name: Build the actual macOS application
            run: |
               bun run build:icons
@@ -49,6 +57,7 @@ jobs:
                  .cache/macos-capture/**/fixture.json
                  .cache/macos-capture/**/*.log
                  .cache/macos-native/link-proof.txt
+                 .cache/macos-native/crash-backtrace.txt
                  .cache/macos-native/build/CMakeFiles/CMakeConfigureLog.yaml
                  .cache/macos-packaged/proof.json
                  .cache/macos-packaged/fixture.log

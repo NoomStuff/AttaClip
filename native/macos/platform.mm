@@ -121,6 +121,16 @@ void prepareProcess(const std::filesystem::path &root) {
 const char *graphicsModule() { return graphics.c_str(); }
 const char *muxPath() { return mux.c_str(); }
 
+bool startup(const char *locale, const char *configuration) {
+  // OBS initializes Carbon keyboard layout APIs. macOS requires those calls on
+  // the main thread, while capture commands must leave that thread's loop free.
+  __block bool initialized = false;
+  auto initialize = ^{ initialized = obs_startup(locale, configuration, nullptr); };
+  if (NSThread.isMainThread) initialize();
+  else dispatch_sync(dispatch_get_main_queue(), initialize);
+  return initialized;
+}
+
 void loadModules() {
   for (const char *name : {"mac-capture", "mac-videotoolbox", "obs-ffmpeg", "obs-x264"}) {
     const auto contents = runtime / "PlugIns" / (std::string(name) + ".plugin") / "Contents";
