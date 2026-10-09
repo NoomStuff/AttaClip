@@ -9,7 +9,7 @@ if (process.platform !== "win32") throw new Error("This real game-hook proof req
 const folder = path.resolve(".cache/native-game", randomUUID());
 await mkdir(folder, { recursive: true });
 const runtime = path.resolve("resources/recorder");
-const fixture = spawn(path.resolve(".cache/native-tests/Release/attaclip-d3d-fixture.exe"), [], { stdio: "pipe" });
+const fixture = spawn(path.resolve(".cache/native-tests/Release/attaclip-d3d-fixture.exe"), ["997", "--attaclip-catalog-proof"], { stdio: "pipe" });
 let handle = "";
 fixture.stdout.once("data", (value: Buffer) => {
    handle = value.toString().trim();
@@ -22,7 +22,7 @@ interface Event {
    waiting?: boolean;
    requestId?: string;
    id?: string;
-   windows?: Array<{ id: string; executable: string; pid: number }>;
+   windows?: Array<{ id: string; executable: string; pid: number; arguments?: string }>;
 }
 const events: Event[] = [];
 const logs: string[] = [];
@@ -45,12 +45,20 @@ async function wait(predicate: (value: Event) => boolean): Promise<Event> {
 }
 try {
    await wait((value) => value.event === "ready");
+   assert(
+      !logs.join("").match(/update_hook_file: source graphics-hook(?:32|64)\.dll missing/),
+      "OBS hook setup must find shipped assets without relying on cached hook files"
+   );
    assert(handle);
    send({ action: "candidates" });
    const candidates = await wait((value) => value.event === "candidates");
    const candidate = candidates.windows?.find((value) => value.id === `window:${handle}:0`);
    assert(candidate, "Exact fixture HWND absent from candidates");
    assert.equal(candidate.pid, fixture.pid);
+   assert(
+      candidate.arguments?.includes("--attaclip-catalog-proof"),
+      "Verified process arguments must support catalog entries that distinguish games sharing a runtime executable"
+   );
    send({
       action: "start",
       id: "start",

@@ -93,7 +93,7 @@ try:
     assert candidate["runtime"]=="wine",candidate
     assert pathlib.Path(candidate["executable"]).resolve()==image.resolve(),candidate
     assert pathlib.Path(candidate["runtimeExecutable"]).name in ["wine64","wine64-preloader","wine","wine-preloader"],candidate
-    assert "arguments" not in candidate,"Unrelated process arguments must not leak into diagnostics"
+    assert "UnrelatedArgument.exe" in candidate.get("arguments", ""),"Verified PID arguments must support shared-runtime catalog matching"
     command(dict(action="start",sourceKind="auto",resolvedKind="app",sourceId=candidate["id"],pid=pid,sourceName="Private Wine game",quality="custom",customWidth=640,customHeight=360,customFPS=24,customCQ=28,clipSeconds=2,captureAudio=False,microphone=False,allowSoftwareEncoder=True))
     time.sleep(4)
     file=folder/"wine-window.mkv"

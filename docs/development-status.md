@@ -2,7 +2,21 @@
 
 Updated 9 October 2026 during the overnight continuation. This is a handoff, not extra agent instructions.
 
-## Current continuation
+## Latest checkpoint
+
+The immutable d109b2e Linux AppImage passed actual packaged capture, audio, queued saves, playback and sharing. Its full source ZIP/container/updater correspondence gate also passed at12:29local. Binary SHA25676f0ab5151560cf08191526ae8cad6960446e5e84072573ce799ef11210c8d1c. Source ZIP work/AttaClip-0.1.0-linux-x64-sources-d109b2e0.zip is1,338,039,049bytes, SHA2562980365b85934580ef088537fd1e3055e44f5af98662f6bb37399c20874a6db2. The exact report is inside WSL at /home/dave/.cache/attaclip-controlled-package/AttaClip-0.1.0-linux-x86_64.AppImage.release.json. Preserve those frozen files. No new binary has been published, and this proof does not approve later application changes.
+
+Mac core native and packaged capture passed again at d109b2e, workflow37916076889. Selected-application and explicit System audio extra-source hooks are now wired, with native and packaged isolation/gain/mute/target-loss tests ready. Their actual Mac run remains pending. The new Mac workflow builds controlled arm64 FFmpeg from the four pinned inputs, compares staged provider files with the official OBS DMG and captures Electron module source evidence. Artifacts contain sources, configs, notices and hash reports, without unclosed binaries. Full Mac OBS dependency correspondence remains unfinished.
+
+Windows CI exposed a real rapid category-selection race. A deterministic two-click test failed before the fix and passes after it. Selections now update immediately and their writes stay ordered even when the dialog closes. Six regular Electron UI tests passed, with three separately gated native tests skipped.63unit tests, strict types and formatting passed. Windows OBS hook initialization now temporarily uses the plugin directory because pinned win-capture resolves assets through ../../data. The prior wrong directory reported missing graphics-hook32/64 files. Actual Direct3D capture, shipped hook lookup and verified process arguments passed at .cache/native-game/be3577f2-a325-4b26-8785-258901ceb61b.
+
+Linux candidates now include bounded arguments from a verified executable/PID/start-time snapshot. This enables argument-specific catalog entries without guessing executables from later arguments. Wine proof .cache/linux-smoke/10a07f19-6bf3-45b9-a9bc-fcdb31475bb7 passed real motion, decoding and the fixture argument. Linux CI's failed artifact upload followed Wine's z: symlink into the filesystem root after media tests passed. The workflow now copies only direct proof files into a curated evidence folder.
+
+Wayland probes have reached actual Sway/PipeWire/ScreenCast sessions, but the headless renderer/backend combination has not produced verified frames yet. Production Wayland remains disabled. Steam-launched Proton, physical device removal, actual sleep, exclusive fullscreen feedback and loaded gameplay remain unverified. The second Portal2 benchmark produced baseline timing but no later trace, then restored all83 backed-up files. Its private evidence is .cache/loaded-game/74ce5a2d-d505-43c7-987c-707462494257. Another existing game was active, so no gameplay-impact claim is justified and that user's process was left untouched.
+
+The refreshed usage window resets at21:34:46 Europe/Amsterdam on9October. Keep the existing continuation automation. Read the ignored platform/source handoffs before repeating expensive source or media checks. Preserve the public Windows0.1.0 release below.
+
+## Earlier continuation
 
 Main is pushed through 96031c8 before the Wine/recovery/source checkpoint. Windows native save feedback uses attaclip-notifier.exe rather than an Electron popup renderer. Actual tests confirmed Saving, Saved and failure rendering, unchanged keyboard focus, capture exclusion, rounded corners and zero idle CPU. Working set was 12.5 MB. Private proof is .cache/native-feedback/a8996bf4-2642-4530-9780-9045177ec88d. Exclusive fullscreen visibility remains unverified.
 

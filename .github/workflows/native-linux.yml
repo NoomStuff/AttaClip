@@ -51,15 +51,32 @@ jobs:
            run: bun run test:packaged:linux release/*.AppImage
          - name: Keep synthetic capture evidence
            if: always()
+           run: |
+              python3 - <<'PY'
+              from pathlib import Path
+              from shutil import copyfile
+              names = {"measurements.json", "events.json", "wine-proof.json", "interruption-proof.json", "report.json"}
+              destination = Path(".cache/linux-capture-evidence")
+              for area in ("linux-smoke", "linux-packaged"):
+                  root = Path(".cache") / area
+                  if not root.exists():
+                      continue
+                  for proof in root.iterdir():
+                      if proof.is_symlink() or not proof.is_dir():
+                          continue
+                      for source in proof.iterdir():
+                          if source.is_symlink() or not source.is_file():
+                              continue
+                          if source.name not in names and source.suffix != ".log":
+                              continue
+                          target = destination / area / proof.name / source.name
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          copyfile(source, target)
+              PY
+         - name: Upload synthetic capture evidence
+           if: always()
            uses: actions/upload-artifact@v7
            with:
               name: linux-capture-evidence
-              path: |
-                 .cache/linux-smoke/**/measurements.json
-                 .cache/linux-smoke/**/wine-proof.json
-                 .cache/linux-smoke/**/interruption-proof.json
-                 .cache/linux-smoke/**/events.json
-                 .cache/linux-smoke/**/*.log
-                 .cache/linux-packaged/**/report.json
-                 .cache/linux-packaged/**/*.log
+              path: .cache/linux-capture-evidence/
               if-no-files-found: ignore

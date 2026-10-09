@@ -156,6 +156,16 @@ nlohmann::json captureCandidates() {
           {"pid", pid},
           {"foreground", foreground == window},
           {"fullscreen", fullscreen}};
+      auto arguments = linuxProcessArguments(pid, executable);
+      if (!arguments.empty()) {
+        try {
+          // Linux argv is byte-oriented. Invalid UTF-8 must not break the
+          // JSON command channel or create a guessed catalog match.
+          nlohmann::json(arguments).dump();
+          candidate["arguments"] = arguments;
+        } catch (const nlohmann::json::exception &) {
+        }
+      }
       if (auto image = wineProcessImage(pid, executable)) {
         candidate["executable"] = image->executable.string();
         candidate["runtime"] = "wine";
@@ -186,6 +196,34 @@ std::string utf8(const std::wstring &value) {
                       result.data(), size, nullptr, nullptr);
   return result;
 }
+std::string processArguments(HANDLE process) {
+  using QueryProcess = LONG(NTAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  static const auto query = reinterpret_cast<QueryProcess>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  if (!query)
+    return {};
+  struct UnicodeText {
+    USHORT length, maximumLength;
+    PWSTR buffer;
+  };
+  ULONG required = 0;
+  constexpr ULONG commandLineInformation = 60;
+  query(process, commandLineInformation, nullptr, 0, &required);
+  if (required < sizeof(UnicodeText) || required > 128 * 1024)
+    return {};
+  std::vector<uint8_t> bytes(required);
+  if (query(process, commandLineInformation, bytes.data(), required, &required) < 0)
+    return {};
+  UnicodeText text{};
+  memcpy(&text, bytes.data(), sizeof(text));
+  const auto start = reinterpret_cast<uintptr_t>(bytes.data());
+  const auto address = reinterpret_cast<uintptr_t>(text.buffer);
+  if (address < start || address - start > bytes.size() ||
+      text.length > bytes.size() - (address - start) ||
+      text.length % sizeof(wchar_t))
+    return {};
+  return utf8(std::wstring(text.buffer, text.length / sizeof(wchar_t)));
+}
 json captureCandidates() {
   json windows = json::array();
   EnumWindows(
@@ -208,6 +246,7 @@ json captureCandidates() {
         DWORD size = DWORD(executable.size());
         bool identified =
             QueryFullProcessImageNameW(process, 0, executable.data(), &size);
+        auto arguments = identified ? processArguments(process) : std::string{};
         CloseHandle(process);
         if (!identified)
           return TRUE;
@@ -231,6 +270,7 @@ json captureCandidates() {
              {"name", utf8(title)},
              {"executable", utf8(executable)},
              {"pid", pid},
+             {"arguments", arguments},
              {"foreground", window == GetForegroundWindow()},
              {"fullscreen", fullscreen}});
         return TRUE;
@@ -730,6 +770,10 @@ public:
           return "Audio source " + extra.name + " is unavailable";
       }
 #endif
+#ifdef __APPLE__
+      auto error = attaclip::macos::audioError(extra.source, extra.window, extra.pid);
+      if (!error.empty()) return extra.name + ": " + error;
+#endif
     }
     return {};
   }
@@ -818,6 +862,10 @@ public:
           throw std::runtime_error("The application audio target changed");
         extra.application = createApplicationAudio(extra.pid, mask);
         extra.source = applicationAudioSource(extra.application);
+#elif defined(__APPLE__)
+        obs_data_release(data);
+        data = nullptr;
+        extra.source = attaclip::macos::createApplicationAudio(extra.window, extra.pid, extra.name);
 #else
         obs_data_release(data);
         throw std::runtime_error("Additional application audio is not "
@@ -825,15 +873,17 @@ public:
 #endif
       } else if (kind == "input" || kind == "output") {
         type = kind == "input" ? microphoneType() : desktopType();
+        std::string device = settings.value("deviceId", "default");
 #ifdef __APPLE__
         if (kind == "output") {
           obs_data_release(data);
-          throw std::runtime_error(
-              "Additional output-device audio is unavailable on macOS");
-        }
-        attaclip::macos::requireMicrophonePermission();
+          data = nullptr;
+          type = nullptr;
+          if (device != "system") throw std::runtime_error("Choose System audio. Individual output-device capture is unavailable on macOS");
+          extra.source = attaclip::macos::createSystemAudio(extra.name);
+        } else {
+          attaclip::macos::requireMicrophonePermission();
 #endif
-        std::string device = settings.value("deviceId", "default");
         auto *properties = obs_get_source_properties(type);
         auto *devices =
             properties ? obs_properties_get(properties, "device_id") : nullptr;
@@ -851,6 +901,9 @@ public:
               "The additional audio device is unavailable");
         }
         obs_data_set_string(data, "device_id", device.c_str());
+#ifdef __APPLE__
+        }
+#endif
       } else {
         obs_data_release(data);
         throw std::runtime_error("The additional audio source kind is invalid");
@@ -874,6 +927,9 @@ public:
               "The additional audio source could not be opened");
         obs_source_set_audio_mixers(extra.source, mask);
       }
+#ifdef __APPLE__
+      if (extra.source) obs_source_set_audio_mixers(extra.source, mask);
+#endif
       additionalAudio.push_back(std::move(extra));
 #ifdef __linux__
       if (additionalAudio.back().application) {
@@ -1820,7 +1876,7 @@ public:
 Recorder *recorder = nullptr;
 int main(int argc, char **argv) {
   try {
-    std::filesystem::path root = argc > 1 ? argv[1] : ".";
+    std::filesystem::path root = std::filesystem::absolute(argc > 1 ? argv[1] : ".");
 #ifdef __APPLE__
     attaclip::macos::prepareProcess(root);
     muxExecutable = attaclip::macos::muxPath();
@@ -1891,6 +1947,10 @@ int main(int argc, char **argv) {
     if (obs_reset_video(&initial) != OBS_VIDEO_SUCCESS)
       throw std::runtime_error("Graphics initialization failed");
 #ifdef _WIN32
+    // The pinned win-capture module resolves hook initialization assets through
+    // ../../data, independently of its configured module data path.
+    const auto originalDirectory = std::filesystem::current_path();
+    std::filesystem::current_path(root / "obs-plugins/64bit");
     for (auto name : {"win-capture", "win-wasapi", "obs-ffmpeg", "obs-nvenc",
                       "obs-qsv11", "obs-x264"}) {
       obs_module_t *module = nullptr;
@@ -1900,6 +1960,7 @@ int main(int argc, char **argv) {
                           data.u8string().c_str()) == MODULE_SUCCESS)
         obs_init_module(module);
     }
+    std::filesystem::current_path(originalDirectory);
 #elif defined(__APPLE__)
     attaclip::macos::loadModules();
 #elif defined(__linux__)
@@ -2002,8 +2063,8 @@ int main(int argc, char **argv) {
               throw std::runtime_error("Choose input or output audio devices");
 #ifdef __APPLE__
             if (kind == "output")
-              throw std::runtime_error(
-                  "Output-device audio is unavailable on macOS");
+              emit({{"event", "audio-devices"}, {"devices", attaclip::macos::outputDevices()}});
+            else {
 #endif
             auto *props = obs_get_source_properties(
                 kind == "input" ? microphoneType() : desktopType());
@@ -2018,6 +2079,9 @@ int main(int argc, char **argv) {
                      {"id", obs_property_list_item_string(property, i)}});
             obs_properties_destroy(props);
             emit({{"event", "audio-devices"}, {"devices", devices}});
+#ifdef __APPLE__
+            }
+#endif
           } else if (action == "status") {
             r.refreshCapture();
             std::lock_guard<std::mutex> lock(r.mutex);

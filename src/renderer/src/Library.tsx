@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
    AppWindow,
    Check,
@@ -39,6 +39,15 @@ export function Library({
    const [filter, setFilter] = useState("all");
    const [order, setOrder] = useState("newest");
    const [categoryClip, setCategoryClip] = useState<Clip | null>(null);
+   const categoryEdit = useRef<{ clip: Clip; persisted: string[]; pending: Promise<void> } | null>(null);
+   const openCategories = (clip: Clip) => {
+      categoryEdit.current = { clip, persisted: clip.categories, pending: Promise.resolve() };
+      setCategoryClip(clip);
+   };
+   const closeCategories = () => {
+      categoryEdit.current = null;
+      setCategoryClip(null);
+   };
    const sources = useMemo(() => [...new Set(state.clips.map((item) => item.source))].filter(Boolean).sort(), [state.clips]);
    const folders = useMemo(
       () => [...new Set(state.clips.map((item) => item.relativePath.replaceAll("\\", "/").split("/").slice(0, -1).join("/")))].filter(Boolean).sort(),
@@ -89,10 +98,21 @@ export function Library({
       // The main process owns confirmation and trashing, so every entry point gets one prompt.
       await run(() => api.deleteClip(clip.id));
    };
-   const assign = async (id: string) => {
-      if (!categoryClip) return;
-      const ids = categoryClip.categories.includes(id) ? categoryClip.categories.filter((item) => item !== id) : [...categoryClip.categories, id];
-      if (await run(() => api.category("assign", { clipId: categoryClip.id, categoryIds: ids }))) setCategoryClip({ ...categoryClip, categories: ids });
+   const assign = (id: string) => {
+      const edit = categoryEdit.current;
+      if (!edit) return;
+      const ids = edit.clip.categories.includes(id) ? edit.clip.categories.filter((item) => item !== id) : [...edit.clip.categories, id];
+      edit.clip = { ...edit.clip, categories: ids };
+      setCategoryClip(edit.clip);
+      // Keep accepted selections ordered even if the dialog closes before disk writes finish.
+      edit.pending = edit.pending.then(async () => {
+         if (await run(() => api.category("assign", { clipId: edit.clip.id, categoryIds: ids }))) {
+            edit.persisted = ids;
+         } else if (categoryEdit.current === edit && edit.clip.categories === ids) {
+            edit.clip = { ...edit.clip, categories: edit.persisted };
+            setCategoryClip(edit.clip);
+         }
+      });
    };
    return (
       <div className="library-page">
@@ -272,7 +292,7 @@ export function Library({
                                           Reveal shareable
                                        </MenuItem>
                                     )}
-                                    <MenuItem onClick={() => setCategoryClip(clip)}>
+                                    <MenuItem onClick={() => openCategories(clip)}>
                                        <Tag size={15} />
                                        Categories
                                     </MenuItem>
@@ -338,7 +358,7 @@ export function Library({
             </div>
          </div>
          {categoryClip && (
-            <div className="modal-backdrop" onClick={() => setCategoryClip(null)}>
+            <div className="modal-backdrop" onClick={closeCategories}>
                <div
                   className="dialog category-dialog"
                   role="dialog"
@@ -346,7 +366,7 @@ export function Library({
                   aria-label="Clip categories"
                   onClick={(event) => event.stopPropagation()}
                >
-                  <IconButton label="Close categories" className="dialog-close" onClick={() => setCategoryClip(null)}>
+                  <IconButton label="Close categories" className="dialog-close" onClick={closeCategories}>
                      <X size={17} />
                   </IconButton>
                   <h2>Categories</h2>
@@ -362,7 +382,7 @@ export function Library({
                   ) : (
                      <p>Create a category in the Library sidebar first.</p>
                   )}
-                  <Button className="primary" onClick={() => setCategoryClip(null)}>
+                  <Button className="primary" onClick={closeCategories}>
                      Done
                   </Button>
                </div>

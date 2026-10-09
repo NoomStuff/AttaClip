@@ -40,6 +40,42 @@ bool portableExecutable(const std::filesystem::path &file) {
   return (flags & 2) && !(flags & 0x2000);
 }
 } // namespace
+std::string linuxProcessArguments(uint32_t pid,
+                                  const std::filesystem::path &runtime) {
+  auto directory = std::filesystem::path("/proc") / std::to_string(pid);
+  std::error_code error;
+  auto identity = std::filesystem::read_symlink(directory / "exe", error);
+  if (error || identity != runtime)
+    return {};
+  auto before = bounded(directory / "stat", 4096);
+  auto arguments = bounded(directory / "cmdline", 16 * 1024);
+  auto after = bounded(directory / "stat", 4096);
+  // The fields after the closing command name include process start time.
+  // Comparing the whole stat would reject normal CPU/accounting changes.
+  auto started = [](const std::string &stat) {
+    auto end = stat.rfind(')');
+    if (end == std::string::npos)
+      return std::string{};
+    std::istringstream fields(stat.substr(end + 1));
+    std::string value;
+    for (int field = 3; field <= 22; field++)
+      if (!(fields >> value))
+        return std::string{};
+    return value;
+  };
+  identity = std::filesystem::read_symlink(directory / "exe", error);
+  if (error || identity != runtime || started(before).empty() ||
+      started(before) != started(after) || arguments.empty() ||
+      arguments.back() != '\0')
+    return {};
+  // argv[0] identifies the executable, not a required application argument.
+  auto end = arguments.find('\0');
+  arguments.erase(0, end + 1);
+  if (!arguments.empty())
+    arguments.pop_back();
+  std::replace(arguments.begin(), arguments.end(), '\0', ' ');
+  return arguments;
+}
 std::optional<WindowsProcessImage>
 wineProcessImage(uint32_t pid, const std::filesystem::path &runtime) {
   auto loader = lower(runtime.filename().string());

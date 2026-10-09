@@ -80,8 +80,11 @@ test("real media plays, creates a verified shareable, and supports overlapping c
       await page.getByRole("button", { name: "Actions for Desktop moment", exact: true }).click();
       await page.getByRole("menuitem", { name: "Categories", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Clip categories" });
-      await dialog.getByRole("button", { name: "Best moments", exact: true }).click();
-      await dialog.getByRole("button", { name: "Funny", exact: true }).click();
+      await dialog.evaluate((node) => {
+         const choices = [...node.querySelectorAll<HTMLButtonElement>("button.category-option")];
+         choices.find((button) => button.textContent?.trim() === "Best moments")!.click();
+         choices.find((button) => button.textContent?.trim() === "Funny")!.click();
+      });
       await dialog.getByRole("button", { name: "Done", exact: true }).click();
       await expect.poll(async () => (await page.evaluate(() => window.attaClip.state())).clips[0]?.categories.length).toBe(2);
       await page.getByRole("button", { name: "Open Desktop moment", exact: true }).click();

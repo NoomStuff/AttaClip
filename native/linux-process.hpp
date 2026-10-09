@@ -11,3 +11,7 @@ struct WindowsProcessImage {
 // arguments and unverified names must not classify unrelated applications.
 std::optional<WindowsProcessImage>
 wineProcessImage(uint32_t pid, const std::filesystem::path &runtime);
+// Reads only this still-identified process. Oversized or unreadable cmdlines
+// are omitted rather than truncated into misleading catalog matches.
+std::string linuxProcessArguments(uint32_t pid,
+                                  const std::filesystem::path &runtime);

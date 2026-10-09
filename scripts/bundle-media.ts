@@ -6,13 +6,17 @@ import { createHash } from "node:crypto";
 import { checkMediaBinary } from "./check-media-binary.ts";
 import { readControlledBuild, type ControlledMediaBuild } from "./controlled-media";
 import { readControlledLinuxBuild, type ControlledLinuxMediaBuild } from "./controlled-media-linux";
+import { readControlledMacBuild, type ControlledMacMediaBuild } from "./controlled-media-macos";
 
 const destination = resolve("resources/media");
 // This directory contains generated files only. Remove stale binaries from other platforms.
 if (destination !== join(process.cwd(), "resources", "media")) throw new Error("Unexpected media destination");
 await rm(destination, { recursive: true, force: true });
 await mkdir(destination, { recursive: true });
-const provenance: Record<string, { path: string; sha256: string; version: string } | ControlledMediaBuild | ControlledLinuxMediaBuild> = {};
+const provenance: Record<
+   string,
+   { path: string; sha256: string; version: string } | ControlledMediaBuild | ControlledLinuxMediaBuild | ControlledMacMediaBuild
+> = {};
 for (const name of ["ffmpeg", "ffprobe"] as const) {
    const binary = `${name}${process.platform === "win32" ? ".exe" : ""}`;
    const source = await realpath(
@@ -22,8 +26,13 @@ for (const name of ["ffmpeg", "ffprobe"] as const) {
             .split(/\r?\n/)[0]!
    );
    checkMediaBinary(source);
-   if ((process.platform === "win32" || process.platform === "linux") && existsSync(join(dirname(source), "build-manifest.json"))) {
-      const controlled = process.platform === "linux" ? await readControlledLinuxBuild(dirname(source)) : await readControlledBuild(dirname(source));
+   if (existsSync(join(dirname(source), "build-manifest.json"))) {
+      const controlled =
+         process.platform === "linux"
+            ? await readControlledLinuxBuild(dirname(source))
+            : process.platform === "darwin"
+              ? await readControlledMacBuild(dirname(source))
+              : await readControlledBuild(dirname(source));
       if (
          controlled.binaries[name].sha256 !==
          createHash("sha256")

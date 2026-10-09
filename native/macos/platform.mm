@@ -31,7 +31,11 @@ bool checkedAvailable = false;
 struct CaptureHealth { std::atomic<bool> failed{false}; };
 std::vector<std::unique_ptr<CaptureHealth>> sourceHealth;
 std::atomic<CaptureHealth *> currentHealth{nullptr};
-struct AudioTarget { CGWindowID window; pid_t pid; std::string bundle; };
+struct AudioTarget {
+  CGWindowID window; pid_t pid; std::string bundle;
+  std::chrono::steady_clock::time_point checkedAt{};
+  std::string cachedError;
+};
 std::unordered_map<obs_source_t *, CaptureHealth *> audioHealth;
 std::unordered_map<obs_source_t *, AudioTarget> audioTargets;
 
@@ -289,6 +293,7 @@ obs_source_t *audioSource(obs_data_t *settings, const std::string &name) {
 }
 
 std::string applicationBundle(CGWindowID window, pid_t pid) {
+  @autoreleasepool {
   if (!pid || !availableWindow(window, pid, nullptr, false))
     throw std::runtime_error("The application audio target changed");
   NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
@@ -303,6 +308,7 @@ std::string applicationBundle(CGWindowID window, pid_t pid) {
   if (matching != 1)
     throw std::runtime_error("Multiple instances of this application are running. Close the other instances before capturing its audio");
   return bundle.UTF8String;
+  }
 }
 }
 
@@ -328,7 +334,7 @@ obs_source_t *createSystemAudio(const std::string &name) {
   obs_data_set_int(settings, "type", 0);
   auto *source = audioSource(settings, name);
   std::lock_guard<std::mutex> lock(availabilityMutex);
-  audioTargets.erase(source);
+  audioTargets[source] = {0, 0, {}};
   return source;
 }
 
@@ -339,15 +345,21 @@ std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid) {
   std::lock_guard<std::mutex> lock(availabilityMutex);
   auto health = audioHealth.find(source);
   if (health != audioHealth.end() && health->second->failed.load()) return "Audio capture stopped. Stop recording and select the source again";
-  if (!CGPreflightScreenCaptureAccess()) return "Screen Recording permission is required for system and application audio";
   auto target = audioTargets.find(source);
-  if (target != audioTargets.end()) {
-    if (window != target->second.window || pid != target->second.pid) return "The application audio target changed";
+  if (target == audioTargets.end()) return "The audio source could not be identified";
+  if (window != target->second.window || pid != target->second.pid) return "The application audio target changed";
+  auto &state = target->second;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - state.checkedAt < std::chrono::milliseconds(100)) return state.cachedError;
+  state.checkedAt = now;
+  state.cachedError.clear();
+  if (!CGPreflightScreenCaptureAccess()) state.cachedError = "Screen Recording permission is required for system and application audio";
+  else if (state.window) {
     try {
-      if (applicationBundle(target->second.window, target->second.pid) != target->second.bundle) return "The application audio target changed";
-    } catch (const std::exception &error) { return error.what(); }
+      if (applicationBundle(state.window, state.pid) != state.bundle) state.cachedError = "The application audio target changed";
+    } catch (const std::exception &error) { state.cachedError = error.what(); }
   }
-  return {};
+  return state.cachedError;
 }
 
 nlohmann::json outputDevices() {

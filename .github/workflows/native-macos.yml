@@ -8,6 +8,12 @@ on:
          - native/CMakeLists.txt
          - scripts/build-recorder-macos.ts
          - scripts/smoke-macos.py
+         - scripts/smoke-macos-audio.py
+         - scripts/build-media-macos.sh
+         - scripts/controlled-media-macos.ts
+         - scripts/smoke-controlled-media-macos.py
+         - scripts/probe-macos-source-runtime.py
+         - scripts/collect-macos-electron.ts
          - scripts/test-macos-packaged.ts
          - .github/workflows/native-macos.yml
 permissions:
@@ -15,21 +21,37 @@ permissions:
 jobs:
    capture:
       runs-on: macos-15
-      timeout-minutes: 30
+      timeout-minutes: 90
       steps:
          - uses: actions/checkout@v7
          - uses: oven-sh/setup-bun@v2
            with:
               bun-version: "1.4.2"
          - run: bun install --frozen-lockfile
-         - name: Provision verified media tools
+         - name: Provision independent pinned fixture generator
            run: bun scripts/provision-media.ts
+         - name: Install media build tools
+           run: brew install meson ninja pkg-config
+         - name: Collect immutable media source inputs
+           run: bun scripts/release-sources.ts --controlled-inputs --collect-only
+         - name: Compile controlled Apple Silicon media
+           run: bash scripts/build-media-macos.sh
+         - name: Verify independent codec fixtures and record actual build
+           run: |
+              ATTACLIP_REFERENCE_FFMPEG="$FFMPEG_PATH" python3 scripts/smoke-controlled-media-macos.py
+              bun scripts/controlled-media-macos.ts
+              echo "FFMPEG_PATH=$PWD/work/controlled-media/macos-arm64/ffmpeg" >> "$GITHUB_ENV"
+              echo "FFPROBE_PATH=$PWD/work/controlled-media/macos-arm64/ffprobe" >> "$GITHUB_ENV"
          - name: Stage verified media tools
            run: bun run bundle:media
          - name: Build and stage matching macOS recorder
            run: bun scripts/build-recorder-macos.ts
+         - name: Compare actual provider binaries with official OBS and probe configuration
+           run: DYLD_LIBRARY_PATH="$PWD/resources/recorder/Frameworks" python3 scripts/probe-macos-source-runtime.py
          - name: Verify actual screen and window recording with generated audio
            run: python3 scripts/smoke-macos.py
+         - name: Verify extra application and system audio
+           run: python3 scripts/smoke-macos-audio.py
          - name: Record native crash diagnostics
            if: failure()
            continue-on-error: true
@@ -48,6 +70,8 @@ jobs:
               CSC_IDENTITY_AUTO_DISCOVERY: "false"
          - name: Verify packaged application capture and sharing
            run: bun scripts/test-macos-packaged.ts
+         - name: Capture matching Electron LGPL source evidence
+           run: bun scripts/collect-macos-electron.ts
          - uses: actions/upload-artifact@v7
            if: always()
            with:
@@ -68,4 +92,30 @@ jobs:
                  .cache/macos-packaged/fixture.log
                  .cache/macos-packaged/fixture-health.json
                  resources/recorder/provenance.json
+                 resources/media/provenance.json
+                 .cache/macos-audio/**/*.json
+                 .cache/macos-audio/**/*.jsonl
+                 .cache/macos-audio/**/*.log
+                 .cache/macos-source/runtime-proof.json
+                 work/controlled-media/macos-arm64/*.json
+                 work/controlled-media/macos-arm64/*.txt
+                 work/controlled-media/macos-arm64/*.log
+                 work/controlled-media/macos-arm64/*.h
+                 work/controlled-media/macos-arm64/*.mak
+                 work/controlled-media/macos-arm64/*.sh
+                 work/controlled-media/macos-arm64/LICENSE*
+                 work/controlled-media/macos-arm64/COPYING*
+                 work/controlled-media/macos-arm64/verification/
+                 work/release-sources/manifest.json
+                 work/release-sources/*.tar.gz
+                 work/release-sources/dependencies/*.tar.gz
+                 work/release-sources/licenses/
+                 work/macos-release-sources/electron-component.json
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.tar.gz
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.txt
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.json
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.gn
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.h
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.patch
+                 work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/licenses/
               retention-days: 7
