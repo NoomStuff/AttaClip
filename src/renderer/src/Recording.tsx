@@ -5,6 +5,7 @@ import { api, Button, Empty, IconButton, LevelSlider, Segmented, Select, Toggle 
 import type { Run } from "./ui";
 import { useSourcePreview } from "./useSourcePreview";
 import { AdditionalAudio } from "./AdditionalAudio";
+import { portalScreenId, sourceChoices } from "../../shared/capture-policy";
 
 export function Recording({ state, visible, run, pulse }: { state: AppState; visible: boolean; run: Run; pulse: number }) {
    const [sources, setSources] = useState<CaptureSource[]>([]);
@@ -40,7 +41,8 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          ? sources.find((item) => item.id === state.recorder.sourceId)
          : (sources.find((item) => item.id === state.preferences.sourceId) ??
            (!state.preferences.sourceId && state.preferences.sourceKind === "screen" ? sources.find((item) => item.kind === "screen") : undefined));
-   const preview = useSourcePreview(source?.id, visible && state.preferences.setupComplete);
+   const portal = sources.some((item) => item.id === portalScreenId);
+   const preview = useSourcePreview(source?.id === portalScreenId ? undefined : source?.id, visible && state.preferences.setupComplete);
    const refresh = async () => {
       setLoading(true);
       await run(async () => setSources(await api.sources()));
@@ -193,7 +195,13 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          <div className="recording-layout">
             <div className="recording-main">
                <div className="preview-surface">
-                  {source ? (
+                  {source?.id === portalScreenId ? (
+                     <Empty
+                        icon={<Monitor size={38} />}
+                        title="Screen capture"
+                        detail="Choose a screen in the system picker when you start recording. Live preview is unavailable for this capture mode."
+                     />
+                  ) : source ? (
                      <>
                         <video
                            ref={preview.video}
@@ -380,16 +388,8 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                      <RefreshCw size={15} className={loading ? "spin" : ""} />
                   </IconButton>
                </div>
-               <Segmented
-                  label="Source type"
-                  value={state.preferences.sourceKind}
-                  values={[
-                     { value: "screen", label: "Screen" },
-                     { value: "app", label: "App" },
-                     { value: "auto", label: "Auto" },
-                  ]}
-                  onChange={switchKind}
-               />
+               <Segmented label="Source type" value={state.preferences.sourceKind} values={sourceChoices(sources)} onChange={switchKind} />
+               {portal && <p className="source-empty">Application and Auto capture are unavailable in this Wayland session.</p>}
                {state.preferences.sourceKind === "auto" ? (
                   <div className="auto-source">
                      <WandSparkles size={25} />

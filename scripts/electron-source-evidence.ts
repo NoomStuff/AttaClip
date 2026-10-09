@@ -18,7 +18,7 @@ const pins = {
 export async function collectElectronFfmpeg(
    project: string,
    directory: string,
-   options: { platform?: "win32" | "linux" | "darwin"; arch?: "x64" | "arm64"; binaryArchive?: string; sourceCache?: string } = {}
+   options: { platform?: "win32" | "linux" | "darwin"; arch?: "x64" | "arm64"; binaryArchive?: string; sourceCache?: string; actualModule?: string } = {}
 ): Promise<{
    id: string;
    version: string;
@@ -138,7 +138,7 @@ export async function collectElectronFfmpeg(
          maxBuffer: 16 * 1024 * 1024,
       }
    );
-   const actualModule = path.join(project, "node_modules/electron/dist", moduleName);
+   const actualModule = options.actualModule ?? path.join(project, "node_modules/electron/dist", moduleName);
    const actualDll = await readFile(actualModule);
    if (!actualDll.equals(officialDll)) throw new Error("Electron FFmpeg module differs from the official release archive.");
    const buildInstructions: FileRecord[] = [];

@@ -4,6 +4,7 @@ import type { AppState, CaptureSource, Preferences, RecordingCapabilities } from
 import { api, Button, Field, Segmented, Select, Toggle } from "./ui";
 import type { Run } from "./ui";
 import { customQualityError, CustomQualityControls, QualityPicker, ShortcutInput } from "./Settings";
+import { portalScreenId, sourceChoices } from "../../shared/capture-policy";
 
 const steps = ["Capture", "Audio", "Clips", "Quality", "Sharing", "Ready"];
 export function Onboarding({ state, run }: { state: AppState; run: Run }) {
@@ -42,6 +43,7 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
       if (step === 1 && draft.microphone) void run(async () => setAudioDevices(await api.audioDevices()));
    }, [step, draft.microphone, run]);
    const source = sources.find((item) => item.id === draft.sourceId);
+   const portal = sources.some((item) => item.id === portalScreenId);
    useEffect(() => {
       void run(async () => {
          const choices = await api.sources();
@@ -111,15 +113,15 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
                            <Monitor size={25} />
                         </div>
                         <h2>What would you like to capture?</h2>
-                        <p>Start with a screen, choose an application, or follow a game automatically. You can switch later.</p>
+                        <p>
+                           {portal
+                              ? "Choose a screen in the system picker when recording starts. Application and Auto capture are unavailable in this Wayland session."
+                              : "Start with a screen, choose an application, or follow a game automatically. You can switch later."}
+                        </p>
                         <Segmented
                            label="Setup capture source"
                            value={draft.sourceKind}
-                           values={[
-                              { value: "screen", label: "Screen" },
-                              { value: "app", label: "App" },
-                              { value: "auto", label: "Auto" },
-                           ]}
+                           values={sourceChoices(sources)}
                            onChange={(kind) => {
                               change("sourceKind", kind);
                               change("sourceId", sources.find((item) => item.kind === kind)?.id ?? draft.sourceId);

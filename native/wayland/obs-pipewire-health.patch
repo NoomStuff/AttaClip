@@ -1,0 +1,260 @@
+--- a/plugins/linux-pipewire/pipewire.h
++++ b/plugins/linux-pipewire/pipewire.h
+@@ -23,11 +23,19 @@
+ #include <obs-module.h>
+ 
+ #include <pipewire/pipewire.h>
++#include <stdatomic.h>
++
++// AttaClip health bridge. Atomics avoid locks in the video callback.
++struct attaclip_portal_health {
++	atomic_bool authorized, closed, failed, valid_frame;
++	atomic_int stream_state;
++};
+ 
+ typedef struct _obs_pipewire obs_pipewire;
+ typedef struct _obs_pipewire_stream obs_pipewire_stream;
+ 
+ struct obs_pipewire_connect_stream_info {
++	struct attaclip_portal_health *health;
+ 	const char *stream_name;
+ 	struct pw_properties *stream_properties;
+ 	struct {
+--- a/plugins/linux-pipewire/pipewire.c
++++ b/plugins/linux-pipewire/pipewire.c
+@@ -96,6 +96,7 @@
+ };
+ 
+ struct _obs_pipewire_stream {
++	struct attaclip_portal_health *health;
+ 	obs_pipewire *obs_pw;
+ 	obs_source_t *source;
+ 
+@@ -859,6 +860,9 @@
+ 	if (obs_pw_video_format.swap_red_blue)
+ 		swap_texture_red_blue(obs_pw_stream->texture);
+ 
++	if (obs_pw_stream->health && obs_pw_stream->texture)
++		atomic_store(&obs_pw_stream->health->valid_frame, true);
++
+ 	/* Video Crop */
+ 	region = spa_buffer_find_meta_data(buffer, SPA_META_VideoCrop, sizeof(*region));
+ 	if (region && spa_meta_region_is_valid(region)) {
+@@ -1068,6 +1072,11 @@
+ 	UNUSED_PARAMETER(old);
+ 
+ 	obs_pipewire_stream *obs_pw_stream = user_data;
++	if (obs_pw_stream->health) {
++		atomic_store(&obs_pw_stream->health->stream_state, state);
++		if (state == PW_STREAM_STATE_ERROR)
++			atomic_store(&obs_pw_stream->health->failed, true);
++	}
+ 
+ 	blog(LOG_INFO, "[pipewire] Stream %p state: \"%s\" (error: %s)", obs_pw_stream->stream,
+ 	     pw_stream_state_as_string(state), error ? error : "none");
+@@ -1203,6 +1212,7 @@
+ 	obs_pw_stream = bzalloc(sizeof(obs_pipewire_stream));
+ 	obs_pw_stream->obs_pw = obs_pw;
+ 	obs_pw_stream->source = source;
++	obs_pw_stream->health = connect_info->health;
+ 	obs_pw_stream->cursor.visible = connect_info->screencast.cursor_visible;
+ 	obs_pw_stream->framerate.set = connect_info->video.framerate != NULL;
+ 	obs_pw_stream->resolution.set = connect_info->video.resolution != NULL;
+--- a/plugins/linux-pipewire/screencast-portal.c
++++ b/plugins/linux-pipewire/screencast-portal.c
+@@ -42,6 +42,10 @@
+ };
+ 
+ struct screencast_portal_capture {
++	struct attaclip_portal_health health;
++	unsigned closed_subscription;
++	unsigned references;
++	bool destroyed;
+ 	enum obs_portal_capture_type capture_type;
+ 
+ 	GCancellable *cancellable;
+@@ -58,6 +62,34 @@
+ 	obs_pipewire *obs_pw;
+ 	obs_pipewire_stream *obs_pw_stream;
+ };
++
++
++typedef struct screencast_portal_capture ScreencastCapture;
++static void attaclip_capture_release(ScreencastCapture *capture)
++{
++	if (--capture->references == 0)
++		bfree(capture);
++}
++G_DEFINE_AUTOPTR_CLEANUP_FUNC(ScreencastCapture, attaclip_capture_release)
++static void attaclip_status(void *data, calldata_t *params)
++{
++	ScreencastCapture *capture = data;
++	calldata_set_bool(params, "authorized", atomic_load(&capture->health.authorized));
++	calldata_set_bool(params, "closed", atomic_load(&capture->health.closed));
++	calldata_set_bool(params, "failed", atomic_load(&capture->health.failed));
++	calldata_set_bool(params, "valid_frame", atomic_load(&capture->health.valid_frame));
++	calldata_set_int(params, "stream_state", atomic_load(&capture->health.stream_state));
++	calldata_set_int(params, "source_type", capture->capture_type);
++}
++static void attaclip_closed(GDBusConnection *connection, const gchar *sender,
++                           const gchar *path, const gchar *interface,
++                           const gchar *signal, GVariant *parameters, gpointer data)
++{
++	UNUSED_PARAMETER(connection); UNUSED_PARAMETER(sender); UNUSED_PARAMETER(path);
++	UNUSED_PARAMETER(interface); UNUSED_PARAMETER(signal); UNUSED_PARAMETER(parameters);
++	ScreencastCapture *capture = data;
++	atomic_store(&capture->health.closed, true);
++}
+ 
+ /* ------------------------------------------------- */
+ 
+@@ -162,8 +194,12 @@
+ 	int fd_index;
+ 
+ 	capture = user_data;
++	g_autoptr(ScreencastCapture) reference = capture;
+ 	result = g_dbus_proxy_call_with_unix_fd_list_finish(G_DBUS_PROXY(source), &fd_list, res, &error);
++	if (capture->destroyed)
++		return;
+ 	if (error) {
++		atomic_store(&capture->health.failed, true);
+ 		if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+ 			blog(LOG_ERROR, "[pipewire] Error retrieving pipewire fd: %s", error->message);
+ 		return;
+@@ -172,7 +208,10 @@
+ 	g_variant_get(result, "(h)", &fd_index, &error);
+ 
+ 	pipewire_fd = g_unix_fd_list_get(fd_list, fd_index, &error);
++	if (capture->destroyed)
++		return;
+ 	if (error) {
++		atomic_store(&capture->health.failed, true);
+ 		if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+ 			blog(LOG_ERROR, "[pipewire] Error retrieving pipewire fd: %s", error->message);
+ 		return;
+@@ -184,6 +223,7 @@
+ 		return;
+ 
+ 	connect_info = (struct obs_pipewire_connect_stream_info){
++		.health = &capture->health,
+ 		.stream_name = "OBS Studio",
+ 		.stream_properties = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+ 						       PW_KEY_MEDIA_ROLE, "Screen", NULL),
+@@ -203,6 +243,7 @@
+ 
+ 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+ 
++	capture->references++;
+ 	g_dbus_proxy_call_with_unix_fd_list(get_screencast_portal_proxy(), "OpenPipeWireRemote",
+ 					    g_variant_new("(oa{sv})", capture->session_handle, &builder),
+ 					    G_DBUS_CALL_FLAGS_NONE, -1, NULL, capture->cancellable,
+@@ -224,33 +265,33 @@
+ 	g_variant_get(parameters, "(u@a{sv})", &response, &result);
+ 
+ 	if (response != 0) {
++		atomic_store(&capture->health.failed, true);
+ 		blog(LOG_WARNING, "[pipewire] Failed to start screencast, denied or cancelled by user");
+ 		return;
+ 	}
+ 
+ 	streams = g_variant_lookup_value(result, "streams", G_VARIANT_TYPE_ARRAY);
++	if (!streams) {
++		atomic_store(&capture->health.failed, true);
++		return;
++	}
+ 
+ 	g_variant_iter_init(&iter, streams);
+ 
+ 	n_streams = g_variant_iter_n_children(&iter);
+ 	if (n_streams != 1) {
+-		blog(LOG_WARNING, "[pipewire] Received more than one stream when only one was expected. "
+-				  "This is probably a bug in the desktop portal implementation you are "
+-				  "using.");
+-
+-		// The KDE Desktop portal implementation sometimes sends an invalid
+-		// response where more than one stream is attached, and only the
+-		// last one is the one we're looking for. This is the only known
+-		// buggy implementation, so let's at least try to make it work here.
+-		for (size_t i = 0; i < n_streams - 1; i++) {
+-			g_autoptr(GVariant) throwaway_properties = NULL;
+-			uint32_t throwaway_pipewire_node;
+-
+-			g_variant_iter_loop(&iter, "(u@a{sv})", &throwaway_pipewire_node, &throwaway_properties);
+-		}
++		atomic_store(&capture->health.failed, true);
++		return;
+ 	}
+ 
+ 	g_variant_iter_loop(&iter, "(u@a{sv})", &capture->pipewire_node, &stream_properties);
++	guint32 selected_type = capture->capture_type;
++	g_variant_lookup(stream_properties, "source_type", "u", &selected_type);
++	if (selected_type != capture->capture_type) {
++		atomic_store(&capture->health.failed, true);
++		return;
++	}
++	atomic_store(&capture->health.authorized, true);
+ 
+ 	if (get_screencast_version() >= 4) {
+ 		g_autoptr(GVariant) restore_token = NULL;
+@@ -320,6 +361,7 @@
+ 	g_variant_get(parameters, "(u@a{sv})", &response, &ret);
+ 
+ 	if (response != 0) {
++		atomic_store(&capture->health.failed, true);
+ 		blog(LOG_WARNING, "[pipewire] Failed to select source, denied or cancelled by user");
+ 		return;
+ 	}
+@@ -397,6 +439,7 @@
+ 	g_variant_get(parameters, "(u@a{sv})", &response, &result);
+ 
+ 	if (response != 0) {
++		atomic_store(&capture->health.failed, true);
+ 		blog(LOG_WARNING, "[pipewire] Failed to create session, denied or cancelled by user");
+ 		return;
+ 	}
+@@ -405,6 +448,10 @@
+ 
+ 	session_handle_variant = g_variant_lookup_value(result, "session_handle", NULL);
+ 	capture->session_handle = g_variant_dup_string(session_handle_variant, NULL);
++	capture->closed_subscription = g_dbus_connection_signal_subscribe(
++		portal_get_dbus_connection(), "org.freedesktop.portal.Desktop",
++		"org.freedesktop.portal.Session", "Closed", capture->session_handle, NULL,
++		G_DBUS_SIGNAL_FLAGS_NONE, attaclip_closed, capture, NULL);
+ 
+ 	select_source(capture);
+ }
+@@ -455,6 +502,15 @@
+ 	GDBusConnection *connection;
+ 	GDBusProxy *proxy;
+ 
++	capture->references = 1;
++	atomic_init(&capture->health.authorized, false);
++	atomic_init(&capture->health.closed, false);
++	atomic_init(&capture->health.failed, false);
++	atomic_init(&capture->health.valid_frame, false);
++	atomic_init(&capture->health.stream_state, PW_STREAM_STATE_UNCONNECTED);
++	proc_handler_add(obs_source_get_proc_handler(capture->source),
++		"void attaclip_status(out bool authorized, out bool closed, out bool failed, out bool valid_frame, out int stream_state, out int source_type)",
++		attaclip_status, capture);
+ 	capture->cancellable = g_cancellable_new();
+ 	connection = portal_get_dbus_connection();
+ 	if (!connection)
+@@ -559,6 +615,9 @@
+ 
+ 	if (!capture)
+ 		return;
++	capture->destroyed = true;
++	if (capture->closed_subscription)
++		g_dbus_connection_signal_unsubscribe(portal_get_dbus_connection(), capture->closed_subscription);
+ 
+ 	if (capture->session_handle) {
+ 		g_dbus_connection_call(portal_get_dbus_connection(), "org.freedesktop.portal.Desktop",
+@@ -574,7 +633,7 @@
+ 	obs_pipewire_destroy(capture->obs_pw);
+ 	g_cancellable_cancel(capture->cancellable);
+ 	g_clear_object(&capture->cancellable);
+-	bfree(capture);
++	attaclip_capture_release(capture);
+ }
+ 
+ static void screencast_portal_capture_save(void *data, obs_data_t *settings)

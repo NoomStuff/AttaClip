@@ -45,6 +45,13 @@ test("live preview captures the chosen window and releases tracks on navigation,
             fixture.showInactive();
          }
       });
+      // Window creation can finish before the compositor exposes the second window.
+      await expect
+         .poll(async () => {
+            const visible = await page.evaluate(() => window.attaClip.sources());
+            return ["Preview fixture A", "Preview fixture B"].every((name) => visible.some((source) => source.name === name));
+         })
+         .toBe(true);
       const choices = await page.evaluate(() => window.attaClip.sources());
       const sourceA = choices.find((source) => source.name === "Preview fixture A");
       const sourceB = choices.find((source) => source.name === "Preview fixture B");

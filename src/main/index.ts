@@ -30,6 +30,7 @@ import { Updates } from "./updates";
 import { linuxStartup } from "./startup";
 import { pendingExitDecision } from "./lifecycle";
 import { Feedback } from "./feedback";
+import { portalScreenId, portalSources } from "../shared/capture-policy";
 
 protocol.registerSchemesAsPrivileged([{ scheme: "attaclip-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -159,6 +160,12 @@ async function showFeedback(message: string, error: boolean, saving: boolean) {
 }
 import { screen } from "electron";
 async function sources(): Promise<CaptureSource[]> {
+   if (process.platform === "linux") {
+      const choices = portalSources(await recorder.capabilities());
+      if (choices !== null) return (cachedSources = choices);
+      // Electron's independent portal session would ask twice and cannot name the native selection.
+      if (process.env["WAYLAND_DISPLAY"]) return (cachedSources = []);
+   }
    const list = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 640, height: 360 }, fetchWindowIcons: false });
    cachedSources = list
       .filter((s) => !s.name.startsWith("AttaClip"))
@@ -412,6 +419,7 @@ function registerIPC() {
          previewSourceId = null;
          return;
       }
+      if (requested === portalScreenId) throw new Error("System-selected capture does not provide a separate live preview.");
       if (!mainWindow?.isVisible() || mainWindow.isMinimized() || !preferences.setupComplete) throw new Error("Open Recording to preview the capture source.");
       const selected =
          preferences.sourceKind === "auto"

@@ -28,6 +28,9 @@ export interface RecordingCapabilities {
    hardwareEncoders: string[];
    recommended: "low" | "standard";
    message: string;
+   captureBackend?: "wayland-portal";
+   sourceKinds?: SourceKind[];
+   portalPicker?: boolean;
 }
 export interface AdditionalAudioSource {
    id: string;

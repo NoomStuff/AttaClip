@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stoppedRecorder } from "../shared/defaults";
-import type { AudioLevels, CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState, RecordingCapabilities } from "../shared/types";
+import type { AudioLevels, CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState, RecordingCapabilities, SourceKind } from "../shared/types";
 import { GameCatalog, selectGame } from "./games";
 import { resolveAudioSources } from "./audio-sources";
 
@@ -40,6 +40,9 @@ interface NativeMessage {
    sourceId?: string;
    sourceKind?: "screen" | "app" | "waiting";
    encoders?: string[];
+   captureBackend?: string;
+   sourceKinds?: unknown;
+   portalPicker?: boolean;
 }
 
 export class Recorder {
@@ -68,6 +71,9 @@ export class Recorder {
    private autoGeneration = 0;
    private focused = new Map<string, number>();
    private encoders: string[] = [];
+   private captureBackend: "wayland-portal" | undefined;
+   private sourceKinds: SourceKind[] = ["screen", "app", "auto"];
+   private portalPicker = false;
    constructor(options: RecorderOptions) {
       this.options = options;
       this.catalog = new GameCatalog(options.gameCatalogPath ?? path.join(process.cwd(), ".cache", "game-catalog.json"));
@@ -129,6 +135,9 @@ export class Recorder {
             hardwareEncoders,
             recommended: hardwareEncoders.length ? "standard" : "low",
             message: hardwareEncoders.length ? "" : "No supported hardware encoder was found. Software encoding uses your CPU.",
+            sourceKinds: [...this.sourceKinds],
+            portalPicker: this.portalPicker,
+            ...(this.captureBackend ? { captureBackend: this.captureBackend } : {}),
          };
       } catch (failure) {
          return {
@@ -334,6 +343,11 @@ export class Recorder {
       if (value.event === "ready") {
          this.current.supported = true;
          this.encoders = Array.isArray(value.encoders) ? value.encoders.filter((value) => typeof value === "string" && value.length < 200) : [];
+         this.captureBackend = value.captureBackend === "wayland-portal" ? "wayland-portal" : undefined;
+         this.sourceKinds = Array.isArray(value.sourceKinds)
+            ? value.sourceKinds.filter((kind): kind is SourceKind => kind === "screen" || kind === "app" || kind === "auto")
+            : ["screen", "app", "auto"];
+         this.portalPicker = value.portalPicker === true;
          this.readyResolve?.();
          this.readyResolve = null;
          this.readyReject = null;
@@ -444,6 +458,8 @@ export class Recorder {
       });
    }
    private async configuration(preferences: Preferences, sources: CaptureSource[]): Promise<Record<string, unknown>> {
+      if (!this.sourceKinds.includes(preferences.sourceKind))
+         throw new Error("Application and Auto capture are unavailable in this Wayland session. Choose Screen to use the system picker.");
       if (preferences.sourceKind === "auto") return this.autoConfiguration(preferences, sources);
       const selected =
          sources.find((s) => s.id === preferences.sourceId && s.kind === preferences.sourceKind) ??
