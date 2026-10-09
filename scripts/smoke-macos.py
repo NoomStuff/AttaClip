@@ -100,6 +100,13 @@ try:
         for line in fixture.stdout:
             fixture_health.append(json.loads(line))
     threading.Thread(target=read_fixture, daemon=True).start()
+    # Compare Apple's display stream against OBS without accepting substitute footage.
+    probe = folder / "sck-probe"
+    subprocess.run(["swiftc", "-parse-as-library", str(root / "native/macos/sck-probe.swift"), "-o", str(probe)], check=True)
+    direct = subprocess.run([str(probe), str(identity["displayId"])], capture_output=True, text=True, timeout=15)
+    (folder / "direct-sck.json").write_text(direct.stdout)
+    (folder / "direct-sck.log").write_text(direct.stderr)
+    assert direct.returncode == 0, direct.stderr
     helper = launch([str(runtime / "attaclip-recorder"), str(runtime)], "native", True)
     def read():
         for line in helper.stdout:

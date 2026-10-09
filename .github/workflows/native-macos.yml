@@ -57,6 +57,7 @@ jobs:
                  .cache/macos-capture/**/partial-proof.json
                  .cache/macos-capture/**/fixture-health.json
                  .cache/macos-capture/**/native-events.json
+                 .cache/macos-capture/**/direct-sck.json
                  .cache/macos-capture/**/fixture.json
                  .cache/macos-capture/**/*.log
                  .cache/macos-native/link-proof.txt
