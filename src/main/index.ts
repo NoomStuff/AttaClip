@@ -71,7 +71,14 @@ const recorder = new Recorder({
    gameCatalogPath: join(app.getPath("userData"), "game-catalog.json"),
    onAudioLevels: (levels) => {
       if (mainWindow?.isVisible() && !mainWindow.isMinimized())
-         send({ type: "audio-levels", levels: { capture: levels.capture * 100, microphone: levels.microphone * 100 } });
+         send({
+            type: "audio-levels",
+            levels: {
+               capture: levels.capture * 100,
+               microphone: levels.microphone * 100,
+               ...(levels.additional ? { additional: Object.fromEntries(Object.entries(levels.additional).map(([id, level]) => [id, level * 100])) } : {}),
+            },
+         });
    },
    nativePath: app.isPackaged
       ? join(process.resourcesPath, "recorder", process.platform === "win32" ? "attaclip-recorder.exe" : "attaclip-recorder")
@@ -414,7 +421,7 @@ function registerIPC() {
       if (!selected || selected.id !== requested) throw new Error("The selected preview source is unavailable.");
       previewSourceId = requested;
    });
-   handle("audio-devices", () => recorder.audioDevices());
+   handle("audio-devices", (kind) => recorder.audioDevices(z.enum(["input", "output"]).default("input").parse(kind)));
    handle("choose-folder", async () => {
       const picked = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"], defaultPath: preferences.collection });
       return picked.canceled ? null : (picked.filePaths[0] ?? null);
@@ -450,6 +457,8 @@ function registerIPC() {
                if (["recording", "waiting"].includes(recorder.status.state)) {
                   await recorder.setAudio({ source: "capture", volume: next.captureVolume, muted: next.captureMuted });
                   await recorder.setAudio({ source: "microphone", volume: next.microphoneVolume, muted: next.microphoneMuted });
+                  for (const source of next.audioSources.filter((source) => source.enabled))
+                     await recorder.setAudio({ source: source.id, volume: source.volume, muted: source.muted });
                }
                await writePreferences(preferencePath, next);
             } catch (e) {
@@ -471,6 +480,8 @@ function registerIPC() {
                   await recorder
                      .setAudio({ source: "microphone", volume: preferences.microphoneVolume, muted: preferences.microphoneMuted })
                      .catch(() => undefined);
+                  for (const source of preferences.audioSources.filter((source) => source.enabled))
+                     await recorder.setAudio({ source: source.id, volume: source.volume, muted: source.muted }).catch(() => undefined);
                }
                throw e;
             }

@@ -35,6 +35,30 @@ export const preferencesSchema = z
          .array(z.object({ name: z.string().trim().min(1).max(200), executable: z.string().min(1).max(4096) }).strict())
          .max(500)
          .default([]),
+      audioSources: z
+         .array(
+            z
+               .object({
+                  id: z
+                     .string()
+                     .min(1)
+                     .max(200)
+                     .refine((value) => !["capture", "microphone"].includes(value), "Choose a unique audio source ID"),
+                  name: z.string().trim().min(1).max(100),
+                  kind: z.enum(["application", "input", "output"]),
+                  deviceId: z.string().max(1000),
+                  sourceId: z.string().max(1000),
+                  executable: z.string().max(4096),
+                  enabled: z.boolean(),
+                  volume: z.number().min(0).max(2),
+                  muted: z.boolean(),
+                  includeInMaster: z.boolean(),
+               })
+               .strict()
+         )
+         .max(3)
+         .refine((items) => new Set(items.map((item) => item.id)).size === items.length, "Audio source IDs must be unique")
+         .default([]),
       shareSizeMB: z.number().min(1).max(2000),
       autoShare: z.boolean(),
       startWithOS: z.boolean(),

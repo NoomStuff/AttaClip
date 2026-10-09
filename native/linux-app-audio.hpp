@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <obs.h>
 #include <string>
 struct ApplicationAudio;
@@ -9,3 +10,5 @@ ApplicationAudio *createApplicationAudio(uint32_t pid, uint32_t mixers = 3);
 obs_source_t *applicationAudioSource(ApplicationAudio *audio);
 std::string applicationAudioError(ApplicationAudio *audio);
 void destroyApplicationAudio(ApplicationAudio *audio);
+void setApplicationAudioLevelCallback(ApplicationAudio *audio,
+                                      std::function<void(float)> callback);

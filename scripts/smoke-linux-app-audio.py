@@ -156,6 +156,33 @@ try:
         endpoints[index]=max(endpoints.get(index,0),float(packet.get("pts_time",0))+float(packet.get("duration_time",0)))
     assert all(abs(endpoints[index]-endpoints[0])<.15 for index in endpoints if index),endpoints
     measured["switchedEndpoints"]=endpoints
+    command(dict(action="stop"))
+    extras=[dict(id="fixture-a",name="Selected A",includeInMaster=False,kind="application",sourceId=candidate["id"],pid=candidate["pid"],volume=1,muted=False,enabled=True),dict(id="fixture-b",name="Selected B",kind="application",sourceId=other["id"],pid=other["pid"],volume=1,muted=False,enabled=True)]
+    command(dict(config,action="start",captureAudio=False,audioSources=extras))
+    time.sleep(4)
+    file=folder/"additional.mkv"
+    command(dict(action="save",path=str(file),requestId="additional",requestedAt=int(time.time()*1000)))
+    wait(lambda event:event["event"]=="saved" and event.get("requestId")=="additional")
+    streams=json.loads(subprocess.check_output(["ffprobe","-v","error","-show_streams","-of","json",str(file)],text=True))["streams"]
+    assert [v["tags"]["title"] for v in streams if v["codec_type"]=="audio"]==["Master","Capture audio","Selected A","Selected B"],streams
+    additional=[]
+    for track in range(4):
+        raw=subprocess.check_output(["ffmpeg","-v","error","-i",str(file),"-map",f"0:a:{track}","-ac","1","-ar","48000","-f","f32le","-"])
+        pcm=array.array("f",raw)[24000:72000]
+        additional.append(dict(a=amplitude(997),b=amplitude(577),unrelated=amplitude(1234)))
+    assert additional[0]["a"]<-50 and additional[0]["b"]>-40,additional
+    assert volume(file,1)<-70,additional
+    assert additional[2]["a"]>-40 and additional[2]["b"]<-50,additional
+    assert additional[3]["b"]>-40 and additional[3]["a"]<-50,additional
+    assert all(v["unrelated"]<-50 for v in additional),additional
+    command(dict(action="audio",source="fixture-a",volume=1,muted=True));time.sleep(4)
+    muted_extra=folder/"muted-additional.mkv"
+    command(dict(action="save",path=str(muted_extra),requestId="muted-additional",requestedAt=int(time.time()*1000)))
+    wait(lambda event:event["event"]=="saved" and event.get("requestId")=="muted-additional")
+    assert volume(muted_extra,2)<-70 and volume(muted_extra,3)>-50
+    measured["additional"]=additional
+    assert any(e.get("additional",{}).get("fixture-a",0)>.05 for e in events if e["event"]=="audio-levels")
+    assert any(e.get("additional",{}).get("fixture-b",0)>.05 for e in events if e["event"]=="audio-levels")
     # A stopped private audio server must invalidate recording rather than
     # silently substitute desktop audio or claim a healthy capture.
     pulse.terminate();pulse.wait(timeout=5);time.sleep(1)

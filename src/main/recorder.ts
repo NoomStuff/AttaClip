@@ -4,8 +4,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stoppedRecorder } from "../shared/defaults";
-import type { CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState, RecordingCapabilities } from "../shared/types";
+import type { AudioLevels, CaptureSource, CustomGame, GameCandidate, Preferences, RecorderState, RecordingCapabilities } from "../shared/types";
 import { GameCatalog, selectGame } from "./games";
+import { resolveAudioSources } from "./audio-sources";
 
 interface RecorderOptions {
    nativePath?: string;
@@ -13,7 +14,7 @@ interface RecorderOptions {
    onState: (state: RecorderState) => void;
    onSaved: (file: string, source: string, requestId: string, capture: { previousFootage: boolean; secondsSinceCapture: number }) => void | Promise<void>;
    onError: (message: string) => void;
-   onAudioLevels?: (levels: { capture: number; microphone: number }) => void;
+   onAudioLevels?: (levels: AudioLevels) => void;
 }
 interface NativeMessage {
    event: string;
@@ -32,6 +33,7 @@ interface NativeMessage {
    devices?: Array<{ id: string; name: string }>;
    capture?: number;
    microphone?: number;
+   additional?: Record<string, unknown>;
    previousFootage?: boolean;
    secondsSinceCapture?: number;
    candidates?: GameCandidate[];
@@ -54,6 +56,7 @@ export class Recorder {
    private fullscreen = false;
    private windowsResolve: (() => void) | null = null;
    private devicesResolve: ((devices: Array<{ id: string; name: string }>) => void) | null = null;
+   private deviceQueries: Promise<unknown> = Promise.resolve();
    private commands = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
    private readonly catalog: GameCatalog;
    private candidatesPending: Promise<GameCandidate[]> | null = null;
@@ -93,20 +96,27 @@ export class Recorder {
       if (this.process) this.send({ action: "status" });
       return this.fullscreen;
    }
-   async audioDevices(): Promise<Array<{ id: string; name: string }>> {
+   async audioDevices(kind: "input" | "output" = "input"): Promise<Array<{ id: string; name: string }>> {
       if (!this.current.supported) return [];
       await this.initialize();
-      return new Promise((resolve) => {
-         const timeout = setTimeout(() => {
-            this.devicesResolve = null;
-            resolve([]);
-         }, 3000);
-         this.devicesResolve = (devices) => {
-            clearTimeout(timeout);
-            resolve(devices);
-         };
-         this.send({ action: "audio-devices" });
-      });
+      const query = this.deviceQueries
+         .catch(() => undefined)
+         .then(
+            () =>
+               new Promise<Array<{ id: string; name: string }>>((resolve) => {
+                  const timeout = setTimeout(() => {
+                     this.devicesResolve = null;
+                     resolve([]);
+                  }, 3000);
+                  this.devicesResolve = (devices) => {
+                     clearTimeout(timeout);
+                     resolve(devices);
+                  };
+                  this.send({ action: "audio-devices", kind });
+               })
+         );
+      this.deviceQueries = query;
+      return query;
    }
    async capabilities(): Promise<RecordingCapabilities> {
       if (!this.current.supported)
@@ -364,6 +374,15 @@ export class Recorder {
          this.options.onAudioLevels?.({
             capture: Number.isFinite(value.capture) ? Math.max(0, Math.min(1, value.capture!)) : 0,
             microphone: Number.isFinite(value.microphone) ? Math.max(0, Math.min(1, value.microphone!)) : 0,
+            ...(value.additional && typeof value.additional === "object" && !Array.isArray(value.additional)
+               ? {
+                    additional: Object.fromEntries(
+                       Object.entries(value.additional)
+                          .filter(([id, level]) => id.length <= 200 && typeof level === "number" && Number.isFinite(level))
+                          .map(([id, level]) => [id, Math.max(0, Math.min(1, level as number))])
+                    ),
+                 }
+               : {}),
          });
       if (value.event === "recording") this.update({ state: "recording", startedAt: Date.now(), availableSeconds: 0, message: "", supported: true });
       if (value.event === "stopped") this.update({ state: "stopped", startedAt: null, availableSeconds: 0, message: "" });
@@ -450,6 +469,10 @@ export class Recorder {
       try {
          await this.initialize();
          const configuration = await this.configuration(preferences, sources);
+         configuration["audioSources"] = resolveAudioSources(
+            preferences.audioSources,
+            preferences.audioSources.some((source) => source.enabled && source.kind === "application") ? await this.candidates() : []
+         );
          await this.command({ action: "start", ...configuration });
          this.autoGeneration++;
          this.autoPreferences = preferences.sourceKind === "auto" ? preferences : null;
@@ -465,7 +488,7 @@ export class Recorder {
       this.autoGeneration++;
       if (this.process) await this.command({ action: "stop" });
    }
-   async setAudio(value: { source: "capture" | "microphone"; volume: number; muted: boolean }): Promise<void> {
+   async setAudio(value: { source: string; volume: number; muted: boolean }): Promise<void> {
       if (!Number.isFinite(value.volume) || value.volume < 0 || value.volume > 2) throw new Error("Audio volume must be between 0 and 200 percent");
       if (this.process) await this.command({ action: "audio", ...value });
    }

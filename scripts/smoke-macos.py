@@ -103,10 +103,15 @@ try:
     # Compare Apple's display stream against OBS without accepting substitute footage.
     probe = folder / "sck-probe"
     subprocess.run(["swiftc", "-parse-as-library", str(root / "native/macos/sck-probe.swift"), "-o", str(probe)], check=True)
-    direct = subprocess.run([str(probe), str(identity["displayId"])], capture_output=True, text=True, timeout=15)
-    (folder / "direct-sck.json").write_text(direct.stdout)
-    (folder / "direct-sck.log").write_text(direct.stderr)
-    assert direct.returncode == 0, direct.stderr
+    direct_results = []
+    direct_logs = []
+    for mode in ("baseline", "obs-bgra", "obs-l10r", "obs-included-audio"):
+        direct = subprocess.run([str(probe), str(identity["displayId"]), mode], capture_output=True, text=True, timeout=15)
+        direct_logs.append(mode + "\n" + direct.stderr)
+        (folder / "direct-sck.log").write_text("\n".join(direct_logs))
+        assert direct.returncode == 0, direct.stderr
+        direct_results.append(json.loads(direct.stdout))
+        (folder / "direct-sck.json").write_text(json.dumps(direct_results, indent=2))
     helper = launch([str(runtime / "attaclip-recorder"), str(runtime)], "native", True)
     def read():
         for line in helper.stdout:

@@ -27,6 +27,23 @@ export interface RecordingCapabilities {
    recommended: "low" | "standard";
    message: string;
 }
+export interface AdditionalAudioSource {
+   id: string;
+   name: string;
+   kind: "application" | "input" | "output";
+   deviceId: string;
+   sourceId: string;
+   executable: string;
+   enabled: boolean;
+   volume: number;
+   muted: boolean;
+   includeInMaster: boolean;
+}
+export interface AudioLevels {
+   capture: number;
+   microphone: number;
+   additional?: Record<string, number>;
+}
 export interface Preferences {
    collection: string;
    clipSeconds: number;
@@ -48,6 +65,7 @@ export interface Preferences {
    microphoneMuted: boolean;
    desktopFallback: boolean;
    customGames: CustomGame[];
+   audioSources: AdditionalAudioSource[];
    shareSizeMB: number;
    autoShare: boolean;
    startWithOS: boolean;
@@ -137,7 +155,7 @@ export interface AppEvent {
    state?: AppState;
    message?: string;
    error?: boolean;
-   levels?: { capture: number; microphone: number };
+   levels?: AudioLevels;
    visible?: boolean;
 }
 export interface DesktopAPI {
@@ -146,7 +164,7 @@ export interface DesktopAPI {
    games(): Promise<GameCandidate[]>;
    recordingCapabilities(): Promise<RecordingCapabilities>;
    previewSource(sourceId: string | null): Promise<void>;
-   audioDevices(): Promise<{ id: string; name: string }[]>;
+   audioDevices(kind?: "input" | "output"): Promise<{ id: string; name: string }[]>;
    savePreferences(value: Preferences): Promise<AppState>;
    chooseFolder(): Promise<string | null>;
    startRecording(): Promise<void>;

@@ -163,11 +163,69 @@ def evidence_path(root, relative):
     return candidate
 
 
+def collect_common_licenses(args):
+    """Complete only the missing common-text package evidence in an existing collection."""
+    root = Path(args.output).resolve()
+    manifest = json.loads((root / "manifest.json").read_text())
+    common = root / "common-licenses"
+    common.mkdir(exist_ok=True)
+    manifest["commonLicenses"] = []
+    data_by_package = {}
+    for file in Path("/usr/share/common-licenses").iterdir():
+        if not file.is_file():
+            continue
+        owner = run(["dpkg-query", "-S", str(file.resolve())]).split(": ", 1)[0]
+        package = next((package for package in manifest["packages"] if package["binaryPackage"] == owner), None)
+        if package is None:
+            version = run(["dpkg-query", "-W", "-f=${Version}", owner]).strip()
+            binary, source_record, binary_url, urls = historical_inputs(root, owner, version)
+            source, source_version = source_identity(binary)
+            folder = root / "packages" / f"{source}-{hashlib.sha256(f'{source} {source_version}'.encode()).hexdigest()[:16]}"
+            folder.mkdir(parents=True, exist_ok=True)
+            archive = folder / archive_name(Path(binary["Filename"]).name)
+            download(binary_url, archive, binary["SHA256"])
+            control = paragraphs(run(["dpkg-deb", "-f", str(archive)]))[0]
+            if source_identity(control) != (source, source_version) or control["Version"] != version:
+                raise ValueError("Common-license package source identity disagrees")
+            captured = []
+            for line in source_record["Checksums-Sha256"].splitlines():
+                if line.strip():
+                    sha256, size, name = line.split()
+                    archive_name(name)
+                    download(urls[name], folder / name, sha256)
+                    if (folder / name).stat().st_size != int(size):
+                        raise ValueError("Common-license package source size changed")
+                    captured.append({"path": str((folder / name).relative_to(root)), "sha256": sha256, "size": int(size), "url": urls[name]})
+            notice = Path("/usr/share/doc") / owner.split(":", 1)[0] / "copyright"
+            target = folder / f"{owner.replace(':', '_')}-copyright.txt"
+            shutil.copyfile(notice.resolve(), target)
+            data_by_package[owner] = deb_data(archive)
+            member = match_member(data_by_package[owner], "copyright", digest(target))
+            if not member:
+                raise ValueError("Common-license owner copyright differs from official package")
+            package = {"binaryPackage": owner, "binaryVersion": version, "sourcePackage": source, "sourceVersion": source_version, "binaryArchive": {"path": str(archive.relative_to(root)), "sha256": digest(archive), "url": binary_url}, "files": [], "sourceArchives": captured, "copyright": {"path": str(target.relative_to(root)), "sha256": digest(target), "package": owner, "debMember": member}}
+            manifest["packages"].append(package)
+        if owner not in data_by_package:
+            data_by_package[owner] = deb_data(evidence_path(root, package["binaryArchive"]["path"]))
+        shutil.copyfile(file, common / file.name)
+        sha256 = digest(common / file.name)
+        member = match_member(data_by_package[owner], file.name, sha256)
+        if not member:
+            raise ValueError(f"Common-license text differs from official package: {file.name}")
+        manifest["commonLicenses"].append({"path": str((common / file.name).relative_to(root)), "sha256": sha256, "package": owner, "debMember": member})
+    (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"Verified {len(manifest['commonLicenses'])} complete common license texts against official packages")
+    return 0
+
+
 def check(args):
-    root, stage = Path(args.output).resolve(), Path(args.stage).resolve()
+    root = Path(args.output).resolve()
+    stage = Path(args.stage).resolve() if args.stage else None
+    packet = json.loads(Path(args.inventory).read_text()) if args.inventory else None
+    staged = {record["path"].removeprefix("resources/recorder/"): record["sha256"] for record in packet["staged"] if record["path"].startswith("resources/recorder/")} if packet else None
     manifest = json.loads((root / "manifest.json").read_text())
     blockers = list(manifest["blockers"])
-    if digest(stage / "provenance.json") != manifest["provenanceSha256"]:
+    if (staged.get("provenance.json") if staged is not None else digest(stage / "provenance.json")) != manifest["provenanceSha256"] and not args.refresh_provenance:
         blockers.append("Recorder provenance changed after source collection")
     proven = {}
     notices = {}
@@ -181,7 +239,8 @@ def check(args):
                 raise ValueError("Official package source identity changed")
             data = deb_data(archive)
             for file in package["files"]:
-                if digest(evidence_path(stage, file["path"])) != file["sha256"] or not match_member(data, Path(file["path"]).name, file["sha256"]):
+                actual = staged.get(file["path"]) if staged is not None else digest(evidence_path(stage, file["path"]))
+                if actual != file["sha256"] or not match_member(data, PurePosixPath(file["path"]).name, file["sha256"]):
                     raise ValueError(f"Staged ELF no longer matches official package: {file['path']}")
                 if file["path"] in proven:
                     raise ValueError("Duplicate staged ELF evidence")
@@ -213,10 +272,31 @@ def check(args):
         notice = package["copyright"]
         if notices.get(notice.get("package", package["binaryPackage"])) != notice["sha256"]:
             blockers.append(f"Copyright lacks official package byte proof for {package['binaryPackage']}")
-    for file in stage.rglob("*"):
-        if file.is_file() and file.name != "attaclip-recorder" and file.open("rb").read(4) == b"\x7fELF" and str(file.relative_to(stage)) not in proven:
-            blockers.append(f"Staged ELF has no exact package/source evidence: {file.relative_to(stage)}")
+    if not manifest.get("commonLicenses"):
+        blockers.append("Common-license package byte evidence has not been collected")
+    common_data = {}
+    for notice in manifest.get("commonLicenses", []):
+        try:
+            package = next(package for package in manifest["packages"] if package["binaryPackage"] == notice["package"])
+            if notice["package"] not in common_data:
+                common_data[notice["package"]] = deb_data(evidence_path(root, package["binaryArchive"]["path"]))
+            if digest(evidence_path(root, notice["path"])) != notice["sha256"] or not match_member(common_data[notice["package"]], Path(notice["path"]).name, notice["sha256"]):
+                raise ValueError("Common-license text differs from official package")
+        except Exception as error:
+            blockers.append(f"{notice['path']}: {error}")
+    if packet:
+        expected = {file.removeprefix("resources/recorder/") for file in packet["nativeElfPaths"] if file != "resources/recorder/attaclip-recorder"}
+        if expected != set(proven):
+            blockers.append("Source packet ELF coverage differs from its native inventory")
+    else:
+        for file in stage.rglob("*"):
+            if file.is_file() and file.name != "attaclip-recorder" and file.open("rb").read(4) == b"\x7fELF" and str(file.relative_to(stage)) not in proven:
+                blockers.append(f"Staged ELF has no exact package/source evidence: {file.relative_to(stage)}")
     print(json.dumps({"packages": len(manifest["packages"]), "elfFiles": len(proven), "blockers": blockers, "staticDependencyReview": manifest.get("staticDependencyReview", "pending")}, indent=2))
+    if not blockers and args.refresh_provenance:
+        manifest["provenanceSha256"] = digest(stage / "provenance.json")
+        manifest["stage"] = str(stage)
+        (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # This checks collected source inputs, not application packaging or static dependency closure.
     return 1 if blockers else 0
 
@@ -336,9 +416,23 @@ def collect(args):
         (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     common = root / "common-licenses"
     common.mkdir(exist_ok=True)
+    manifest["commonLicenses"] = []
+    common_data = {}
     for file in Path("/usr/share/common-licenses").iterdir():
         if file.is_file():
             shutil.copyfile(file, common / file.name)
+            try:
+                owner = run(["dpkg-query", "-S", str(file.resolve())]).split(": ", 1)[0]
+                package = next(package for package in manifest["packages"] if package["binaryPackage"] == owner)
+                if owner not in common_data:
+                    common_data[owner] = deb_data(evidence_path(root, package["binaryArchive"]["path"]))
+                expected = digest(common / file.name)
+                member = match_member(common_data[owner], file.name, expected)
+                if not member:
+                    raise ValueError("Common-license bytes are absent from owning official package")
+                manifest["commonLicenses"].append({"path": str((common / file.name).relative_to(root)), "sha256": expected, "package": owner, "debMember": member})
+            except Exception as error:
+                manifest["blockers"].append(f"Common license {file.name}: {error}")
     for package in manifest["packages"]:
         notice = package["copyright"]
         if not notice["debMember"]:
@@ -353,9 +447,16 @@ def collect(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True)
+    parser.add_argument("--stage")
+    parser.add_argument("--inventory", help="Offline check against the final source packet's native inventory")
     parser.add_argument("--output", required=True)
     parser.add_argument("--no-update", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--common-only", action="store_true")
+    parser.add_argument("--refresh-provenance", action="store_true", help="Rebind rebuilt helper metadata only after all official staged ELF bytes pass")
     arguments = parser.parse_args()
-    raise SystemExit(check(arguments) if arguments.check else collect(arguments))
+    if not arguments.stage and not (arguments.check and arguments.inventory):
+        parser.error("--stage is required for collection or live checking")
+    if arguments.refresh_provenance and (not arguments.check or arguments.inventory):
+        parser.error("--refresh-provenance requires --check with an actual stage")
+    raise SystemExit(check(arguments) if arguments.check else collect_common_licenses(arguments) if arguments.common_only else collect(arguments))

@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <obs.h>
+#include <set>
 #include <thread>
 #include <util/pipe.h>
 #include <util/platform.h>
@@ -72,7 +73,7 @@ std::string windowText(xcb_window_t window, const char *name) {
   auto end = std::find(bytes.begin(), bytes.end(), uint8_t(0));
   return std::string(bytes.begin(), end);
 }
-bool x11Available(uintptr_t window, uint32_t pid) {
+bool x11Available(uintptr_t window, uint32_t pid, bool requireVisible = true) {
   if (!window)
     return true;
   std::lock_guard<std::mutex> lock(xcbMutex);
@@ -82,8 +83,10 @@ bool x11Available(uintptr_t window, uint32_t pid) {
       candidateConnection,
       xcb_get_window_attributes(candidateConnection, uint32_t(window)),
       nullptr);
-  bool available = reply && reply->map_state == XCB_MAP_STATE_VIEWABLE &&
-                   (!pid || cardinal(uint32_t(window), "_NET_WM_PID") == pid);
+  bool available =
+      reply &&
+      (!requireVisible || reply->map_state == XCB_MAP_STATE_VIEWABLE) &&
+      (!pid || cardinal(uint32_t(window), "_NET_WM_PID") == pid);
   free(reply);
   return available;
 }
@@ -340,6 +343,7 @@ struct Job {
   std::string source;
   std::vector<Packet> packets;
   std::vector<std::vector<uint8_t>> headers;
+  std::vector<std::string> audioNames;
 };
 struct PacketInfo {
   int64_t pts, dts;
@@ -359,6 +363,29 @@ public:
   ApplicationAudio *applicationAudio = nullptr;
 #endif
   obs_source_t *mic = nullptr;
+  struct ExtraMeter {
+    Recorder *owner;
+    std::string id;
+    obs_volmeter_t *meter = nullptr;
+    std::atomic<uint64_t> lastEvent{0};
+    ~ExtraMeter() {
+      if (meter)
+        obs_volmeter_destroy(meter);
+    }
+  };
+  struct AdditionalAudio {
+    std::string id, name;
+    obs_source_t *source = nullptr;
+    uintptr_t window = 0;
+    uint32_t pid = 0;
+    std::shared_ptr<ExtraMeter> metering;
+#ifdef __linux__
+    ApplicationAudio *application = nullptr;
+#endif
+  };
+  std::vector<AdditionalAudio> additionalAudio;
+  std::mutex audioSourcesMutex;
+  std::vector<std::string> audioNames;
   obs_sceneitem_t *item = nullptr;
   std::mutex mutex;
   std::condition_variable wake;
@@ -385,8 +412,9 @@ public:
   std::atomic<float> captureLevel{0}, microphoneLevel{0};
   std::atomic<uint64_t> lastMeterEvent{0};
   float captureVolume = 1, microphoneVolume = 1;
-  bool captureMuted = false, microphoneMuted = false, screenCapture = true,
+  bool captureMuted = false, microphoneMuted = false,
        captureAudioEnabled = true;
+  std::atomic<bool> screenCapture{true};
   size_t bytes = 0;
   int seconds = 60, width = 1920, height = 1080, fps = 60;
   int64_t previousEnd = 0;
@@ -452,10 +480,27 @@ public:
     obs_set_output_source(0, nullptr);
     obs_set_output_source(1, nullptr);
     obs_set_output_source(2, nullptr);
+    for (uint32_t channel = 3; channel < 6; channel++)
+      obs_set_output_source(channel, nullptr);
+    {
+      std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+      for (auto &extra : additionalAudio) {
+        extra.metering.reset();
 #ifdef __linux__
-    destroyApplicationAudio(applicationAudio);
-    applicationAudio = nullptr;
+        if (extra.application)
+          destroyApplicationAudio(extra.application);
+        else
 #endif
+            if (extra.source)
+          obs_source_release(extra.source);
+      }
+      additionalAudio.clear();
+      audioNames.clear();
+#ifdef __linux__
+      destroyApplicationAudio(applicationAudio);
+      applicationAudio = nullptr;
+#endif
+    }
     if (scene) {
       obs_scene_release(scene);
       scene = nullptr;
@@ -504,6 +549,8 @@ public:
     idleVideo();
   }
   bool targetAvailable() {
+    if (!additionalAudioError().empty())
+      return false;
     if (!captureEnabled)
       return false;
     if (gameCapture && !gameReady)
@@ -526,7 +573,7 @@ public:
 #ifdef __linux__
     if (!screenCapture && !windowCompatibility && captureTextureFailure)
       return false;
-    if (!applicationAudioError(applicationAudio).empty())
+    if (!captureAudioError().empty())
       return false;
     if (windowCompatibility && !x11CompatibilityAvailable(targetWindow.load()))
       return false;
@@ -584,8 +631,235 @@ public:
         obs_source_set_volume(mic, volume);
         obs_source_set_muted(mic, muted);
       }
-    } else
-      throw std::runtime_error("Unknown audio source");
+    } else {
+      auto found = std::find_if(
+          additionalAudio.begin(), additionalAudio.end(),
+          [&](const AdditionalAudio &value) { return value.id == source; });
+      if (found == additionalAudio.end())
+        throw std::runtime_error("Unknown audio source");
+      if (found->source) {
+        obs_source_set_volume(found->source, volume);
+        obs_source_set_muted(found->source, muted);
+      }
+    }
+  }
+  std::string additionalAudioError() {
+    std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+    for (auto &extra : additionalAudio) {
+#ifdef _WIN32
+      if (extra.window) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(reinterpret_cast<HWND>(extra.window), &pid);
+        if (!IsWindow(reinterpret_cast<HWND>(extra.window)) || pid != extra.pid)
+          return "Audio source " + extra.name + " is unavailable";
+        calldata_t state{};
+        calldata_init(&state);
+        bool queried = proc_handler_call(
+            obs_source_get_proc_handler(extra.source), "get_hooked", &state);
+        bool ready = queried && calldata_bool(&state, "hooked");
+        calldata_free(&state);
+        if (!ready)
+          return "Waiting for audio source " + extra.name;
+      }
+#endif
+#ifdef __linux__
+      if (extra.application) {
+        auto error = applicationAudioError(extra.application);
+        if (!error.empty())
+          return extra.name + ": " + error;
+        if (!x11Available(extra.window, extra.pid, false))
+          return "Audio source " + extra.name + " is unavailable";
+      }
+#endif
+    }
+    return {};
+  }
+  std::string captureAudioError() {
+#ifdef __linux__
+    std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+    return applicationAudioError(applicationAudio);
+#else
+    return {};
+#endif
+  }
+  void setupAdditionalAudio(const json &config) {
+    auto sources = config.value("audioSources", json::array());
+    if (!sources.is_array() || sources.size() > 3)
+      throw std::runtime_error("Add up to three additional audio sources");
+    std::set<std::string> identities;
+    audioNames = {"Master", "Capture audio"};
+    if (mic)
+      audioNames.emplace_back("Microphone");
+    for (const auto &settings : sources) {
+      AdditionalAudio extra;
+      extra.id = settings.at("id").get<std::string>();
+      extra.name = settings.at("name").get<std::string>();
+      if (extra.id.empty() || extra.id == "capture" ||
+          extra.id == "microphone" || !identities.insert(extra.id).second ||
+          extra.name.empty() || extra.name.size() > 400)
+        throw std::runtime_error(
+            "The additional audio source identity is invalid");
+      uint32_t mixer = uint32_t(audioNames.size());
+      audioNames.push_back(extra.name);
+      uint32_t mask =
+          (settings.value("includeInMaster", true) ? 1u : 0u) | (1u << mixer);
+      if (!settings.value("enabled", true)) {
+        additionalAudio.push_back(std::move(extra));
+        continue;
+      }
+      std::string kind = settings.at("kind");
+      auto *data = obs_data_create();
+      const char *type = nullptr;
+      if (kind == "application") {
+        std::string identity = settings.value("sourceId", "");
+        if (identity.rfind("window:", 0) != 0) {
+          obs_data_release(data);
+          throw std::runtime_error(
+              "Choose an available application audio source");
+        }
+        extra.window = std::stoull(identity.substr(7));
+        extra.pid = settings.at("pid");
+#ifdef _WIN32
+        auto window = reinterpret_cast<HWND>(extra.window);
+        DWORD actual = 0;
+        GetWindowThreadProcessId(window, &actual);
+        if (!IsWindow(window) || actual != extra.pid) {
+          obs_data_release(data);
+          throw std::runtime_error("The application audio target changed");
+        }
+        dstr title{}, klass{}, exe{};
+        ms_get_window_title(&title, window);
+        ms_get_window_class(&klass, window);
+        bool identified =
+            ms_get_window_exe(&exe, window) &&
+            ms_find_window(INCLUDE_MINIMIZED, WINDOW_PRIORITY_TITLE,
+                           klass.array, title.array, exe.array) == window;
+        for (auto *part : {&title, &klass, &exe}) {
+          dstr_replace(part, "#", "#22");
+          dstr_replace(part, ":", "#3A");
+        }
+        std::string match = std::string(title.array ? title.array : "") + ":" +
+                            (klass.array ? klass.array : "") + ":" +
+                            (exe.array ? exe.array : "");
+        dstr_free(&title);
+        dstr_free(&klass);
+        dstr_free(&exe);
+        if (!identified) {
+          obs_data_release(data);
+          throw std::runtime_error(
+              "The application audio target cannot be distinguished safely");
+        }
+        obs_data_set_string(data, "window", match.c_str());
+        obs_data_set_int(data, "priority", 0);
+        type = "wasapi_process_output_capture";
+#elif defined(__linux__)
+        obs_data_release(data);
+        data = nullptr;
+        if (!x11Available(extra.window, extra.pid, false))
+          throw std::runtime_error("The application audio target changed");
+        extra.application = createApplicationAudio(extra.pid, mask);
+        extra.source = applicationAudioSource(extra.application);
+#else
+        obs_data_release(data);
+        throw std::runtime_error("Additional application audio is not "
+                                 "available on this platform yet");
+#endif
+      } else if (kind == "input" || kind == "output") {
+        type = kind == "input" ? microphoneType() : desktopType();
+#ifdef __APPLE__
+        if (kind == "output") {
+          obs_data_release(data);
+          throw std::runtime_error(
+              "Additional output-device audio is unavailable on macOS");
+        }
+        attaclip::macos::requireMicrophonePermission();
+#endif
+        std::string device = settings.value("deviceId", "default");
+        auto *properties = obs_get_source_properties(type);
+        auto *devices =
+            properties ? obs_properties_get(properties, "device_id") : nullptr;
+        bool found = false;
+        if (devices)
+          for (size_t index = 0; index < obs_property_list_item_count(devices);
+               index++)
+            if (device == obs_property_list_item_string(devices, index) &&
+                !obs_property_list_item_disabled(devices, index))
+              found = true;
+        obs_properties_destroy(properties);
+        if (!found) {
+          obs_data_release(data);
+          throw std::runtime_error(
+              "The additional audio device is unavailable");
+        }
+        obs_data_set_string(data, "device_id", device.c_str());
+      } else {
+        obs_data_release(data);
+        throw std::runtime_error("The additional audio source kind is invalid");
+      }
+      if (type) {
+        bool registered = false;
+        const char *candidate = nullptr;
+        for (size_t index = 0; obs_enum_input_types(index, &candidate); index++)
+          if (std::string(candidate) == type)
+            registered = true;
+        if (!registered) {
+          obs_data_release(data);
+          throw std::runtime_error(
+              "This additional audio source is unavailable on this platform");
+        }
+        extra.source =
+            obs_source_create_private(type, extra.name.c_str(), data);
+        obs_data_release(data);
+        if (!extra.source)
+          throw std::runtime_error(
+              "The additional audio source could not be opened");
+        obs_source_set_audio_mixers(extra.source, mask);
+      }
+      additionalAudio.push_back(std::move(extra));
+#ifdef __linux__
+      if (additionalAudio.back().application) {
+        std::string identity = additionalAudio.back().id;
+        setApplicationAudioLevelCallback(
+            additionalAudio.back().application, [this, identity](float value) {
+              if (active)
+                emit({{"event", "audio-levels"},
+                      {"capture", captureLevel.load()},
+                      {"microphone", microphoneLevel.load()},
+                      {"additional", {{identity, value}}}});
+            });
+      }
+#endif
+      auto metering = std::make_shared<ExtraMeter>();
+      metering->owner = this;
+      metering->id = additionalAudio.back().id;
+      metering->meter = obs_volmeter_create(OBS_FADER_LOG);
+      obs_volmeter_add_callback(
+          metering->meter,
+          [](void *data, const float *, const float *peak, const float *) {
+            auto *meter = static_cast<ExtraMeter *>(data);
+            float value = 0;
+            for (size_t channel = 0; channel < 2; channel++)
+              if (std::isfinite(peak[channel]))
+                value = std::max(
+                    value, std::clamp((peak[channel] + 60.f) / 60.f, 0.f, 1.f));
+            uint64_t now = os_gettime_ns(), last = meter->lastEvent.load();
+            if (meter->owner->active && now - last >= 200000000 &&
+                meter->lastEvent.compare_exchange_strong(last, now))
+              emit({{"event", "audio-levels"},
+                    {"capture", meter->owner->captureLevel.load()},
+                    {"microphone", meter->owner->microphoneLevel.load()},
+                    {"additional", {{meter->id, value}}}});
+          },
+          metering.get());
+      obs_volmeter_attach_source(metering->meter,
+                                 additionalAudio.back().source);
+      additionalAudio.back().metering = std::move(metering);
+      obs_set_output_source(uint32_t(additionalAudio.size() + 2),
+                            additionalAudio.back().source);
+      setAudio({{"source", additionalAudio.back().id},
+                {"volume", settings.value("volume", 1.f)},
+                {"muted", settings.value("muted", false)}});
+    }
   }
   void packets(encoder_packet *p) {
     if (!p) {
@@ -705,6 +979,7 @@ public:
       obs_encoder_get_extra_data(a, &data, &size);
       j.headers.emplace_back(data, data + size);
     }
+    j.audioNames = audioNames;
     jobs.emplace_back(std::move(j));
     wake.notify_all();
   }
@@ -808,7 +1083,7 @@ public:
       if (j.headers.size() > 1) {
         add("aac");
         for (size_t i = 1; i < j.headers.size(); i++) {
-          add(i == 1 ? "Master" : i == 2 ? "Capture audio" : "Microphone");
+          add(j.audioNames.at(i - 1));
           add("160");
           add("48000");
           add("1024");
@@ -900,8 +1175,11 @@ public:
       capture = nullptr;
 #ifdef __linux__
       obs_set_output_source(1, nullptr);
-      destroyApplicationAudio(applicationAudio);
-      applicationAudio = nullptr;
+      {
+        std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+        destroyApplicationAudio(applicationAudio);
+        applicationAudio = nullptr;
+      }
 #endif
       if (desktop)
         obs_source_set_muted(desktop, true);
@@ -1199,8 +1477,11 @@ public:
     }
     obs_volmeter_detach_source(captureMeter);
     obs_set_output_source(1, nullptr);
-    destroyApplicationAudio(applicationAudio);
-    applicationAudio = nextAudio;
+    {
+      std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+      destroyApplicationAudio(applicationAudio);
+      applicationAudio = nextAudio;
+    }
     obs_set_output_source(1, kind == "screen"
                                  ? desktop
                                  : applicationAudioSource(applicationAudio));
@@ -1259,6 +1540,16 @@ public:
       obs_source_set_muted(audioSource, captureMuted || !captureAudioEnabled);
       obs_volmeter_attach_source(captureMeter, audioSource);
     }
+#ifdef __linux__
+    if (applicationAudio)
+      setApplicationAudioLevelCallback(applicationAudio, [this](float value) {
+        captureLevel = value;
+        if (active)
+          emit({{"event", "audio-levels"},
+                {"capture", value},
+                {"microphone", microphoneLevel.load()}});
+      });
+#endif
   }
   void start(const json &c) {
     if (active)
@@ -1351,6 +1642,7 @@ public:
       obs_volmeter_attach_source(microphoneMeter, mic);
     }
     source(c);
+    setupAdditionalAudio(c);
     captureVolume = c.value("captureVolume", 1.f);
     microphoneVolume = c.value("microphoneVolume", 1.f);
     captureMuted = c.value("captureMuted", false);
@@ -1409,14 +1701,11 @@ public:
     obs_encoder_set_video(video, obs_get_video());
     output = obs_output_create("attaclip_replay", "Replay", nullptr, nullptr);
     obs_output_set_video_encoder(output, video);
-    for (size_t i = 0; i < (mic ? 3 : 2); i++) {
+    for (size_t i = 0; i < audioNames.size(); i++) {
       d = obs_data_create();
       obs_data_set_int(d, "bitrate", 160);
-      auto *a = obs_audio_encoder_create("ffmpeg_aac",
-                                         i == 0   ? "Master"
-                                         : i == 1 ? "Capture audio"
-                                                  : "Microphone",
-                                         d, i, nullptr);
+      auto *a = obs_audio_encoder_create("ffmpeg_aac", audioNames[i].c_str(), d,
+                                         i, nullptr);
       obs_data_release(d);
       if (!a)
         throw std::runtime_error("The audio encoder could not be created");
@@ -1610,13 +1899,25 @@ int main(int argc, char **argv) {
             emit({{"event", "windows"}, {"windows", windows}});
 #endif
           } else if (action == "audio-devices") {
-            auto *props = obs_get_source_properties(microphoneType());
-            auto *property = obs_properties_get(props, "device_id");
+            std::string kind = c.value("kind", "input");
+            if (kind != "input" && kind != "output")
+              throw std::runtime_error("Choose input or output audio devices");
+#ifdef __APPLE__
+            if (kind == "output")
+              throw std::runtime_error(
+                  "Output-device audio is unavailable on macOS");
+#endif
+            auto *props = obs_get_source_properties(
+                kind == "input" ? microphoneType() : desktopType());
+            auto *property =
+                props ? obs_properties_get(props, "device_id") : nullptr;
             json devices = json::array();
-            for (size_t i = 0; i < obs_property_list_item_count(property); i++)
-              devices.push_back(
-                  {{"name", obs_property_list_item_name(property, i)},
-                   {"id", obs_property_list_item_string(property, i)}});
+            if (property)
+              for (size_t i = 0; i < obs_property_list_item_count(property);
+                   i++)
+                devices.push_back(
+                    {{"name", obs_property_list_item_name(property, i)},
+                     {"id", obs_property_list_item_string(property, i)}});
             obs_properties_destroy(props);
             emit({{"event", "audio-devices"}, {"devices", devices}});
           } else if (action == "status") {
@@ -1650,8 +1951,10 @@ int main(int argc, char **argv) {
             captureError = attaclip::macos::captureError();
 #endif
 #ifdef __linux__
-            captureError = applicationAudioError(r.applicationAudio);
+            captureError = r.captureAudioError();
 #endif
+            if (captureError.empty())
+              captureError = r.additionalAudioError();
             emit({{"event", "status"},
                   {"fullscreen", fullscreen},
                   {"active", r.active.load()},

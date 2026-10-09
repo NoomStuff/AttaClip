@@ -20,6 +20,7 @@ export const defaultPreferences: Preferences = {
    microphoneMuted: false,
    desktopFallback: false,
    customGames: [],
+   audioSources: [],
    shareSizeMB: 20,
    autoShare: false,
    startWithOS: false,

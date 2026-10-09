@@ -2,11 +2,14 @@
 // PulseAudio supports monitoring a single sink input without moving or muting
 // playback. Private OBS child sources mix verified process streams together.
 #include "linux-app-audio.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <pulse/pulseaudio.h>
 #include <set>
@@ -122,11 +125,30 @@ struct Input {
   uint64_t processStarted;
   std::string monitor;
 };
+struct AudioLevels : std::enable_shared_from_this<AudioLevels> {
+  std::mutex mutex;
+  std::function<void(float)> callback;
+  float peak = 0;
+  uint64_t last = 0;
+  void report(float value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    peak = std::max(peak, value);
+    auto now = os_gettime_ns();
+    if (callback && now - last > 200000000) {
+      callback(peak > 0 ? std::clamp((20.f * std::log10(peak) + 60.f) / 60.f,
+                                     0.f, 1.f)
+                        : 0);
+      last = now;
+      peak = 0;
+    }
+  }
+};
 struct MonitoredInput {
   obs_source_t *source;
   uint32_t index, pid, sink;
   uint64_t processStarted;
   std::string monitor;
+  std::shared_ptr<AudioLevels> levels;
   std::atomic<bool> quit{false};
   std::atomic<bool> ended{false};
   uint64_t nextTimestamp = 0;
@@ -137,6 +159,9 @@ struct MonitoredInput {
         sink(uint32_t(obs_data_get_int(settings, "sink"))),
         processStarted(uint64_t(obs_data_get_int(settings, "started"))),
         monitor(obs_data_get_string(settings, "monitor")) {
+    levels = reinterpret_cast<AudioLevels *>(
+                 uintptr_t(obs_data_get_int(settings, "levels")))
+                 ->shared_from_this();
     thread = std::thread([this] { capture(); });
   }
   ~MonitoredInput() {
@@ -205,6 +230,12 @@ struct MonitoredInput {
               audio.timestamp = self->nextTimestamp;
               self->nextTimestamp += duration;
               obs_source_output_audio(self->source, &audio);
+              float peak = 0;
+              auto *samples = static_cast<const float *>(frames);
+              for (size_t index = 0; index < bytes / sizeof(float); index++)
+                if (std::isfinite(samples[index]))
+                  peak = std::max(peak, std::abs(samples[index]));
+              self->levels->report(peak);
             }
             pa_stream_drop(stream);
           },
@@ -250,6 +281,7 @@ bool inputEnded(obs_source_t *source) {
 struct ApplicationAudio {
   uint32_t pid;
   uint32_t mixers;
+  std::shared_ptr<AudioLevels> levels = std::make_shared<AudioLevels>();
   uint64_t processStarted;
   obs_scene_t *scene;
   std::atomic<bool> quit{false};
@@ -276,6 +308,10 @@ struct ApplicationAudio {
     thread = std::thread([this] { run(); });
   }
   ~ApplicationAudio() {
+    {
+      std::lock_guard<std::mutex> lock(levels->mutex);
+      levels->callback = {};
+    }
     quit = true;
     thread.join();
     for (auto &entry : children) {
@@ -365,6 +401,8 @@ struct ApplicationAudio {
           obs_data_set_int(settings, "sink", input.sink);
           obs_data_set_int(settings, "started", int64_t(input.processStarted));
           obs_data_set_string(settings, "monitor", input.monitor.c_str());
+          obs_data_set_int(settings, "levels",
+                           int64_t(reinterpret_cast<uintptr_t>(levels.get())));
           auto *source = obs_source_create_private(
               "attaclip_pulse_input", "Verified application audio input",
               settings);
@@ -460,3 +498,10 @@ std::string applicationAudioError(ApplicationAudio *audio) {
   return audio->error;
 }
 void destroyApplicationAudio(ApplicationAudio *audio) { delete audio; }
+void setApplicationAudioLevelCallback(ApplicationAudio *audio,
+                                      std::function<void(float)> callback) {
+  if (!audio)
+    return;
+  std::lock_guard<std::mutex> lock(audio->levels->mutex);
+  audio->levels->callback = std::move(callback);
+}

@@ -50,6 +50,8 @@ export function requiresCaptureRestart(a: Preferences, b: Preferences): boolean 
       a.microphone !== b.microphone ||
       a.microphoneDevice !== b.microphoneDevice ||
       a.captureAudio !== b.captureAudio ||
-      a.avoidOverlap !== b.avoidOverlap
+      a.avoidOverlap !== b.avoidOverlap ||
+      JSON.stringify(a.audioSources.map((source) => ({ ...source, volume: 1, muted: false }))) !==
+         JSON.stringify(b.audioSources.map((source) => ({ ...source, volume: 1, muted: false })))
    );
 }

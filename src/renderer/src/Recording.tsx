@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AppWindow, AudioLines, Clapperboard, Circle, CircleStop, Mic, MicOff, Monitor, RefreshCw, Volume2, VolumeX, WandSparkles } from "lucide-react";
-import type { AppState, CaptureSource, GameCandidate, Preferences, SourceKind } from "../../shared/types";
+import type { AppState, AudioLevels, CaptureSource, GameCandidate, Preferences, SourceKind } from "../../shared/types";
 import { api, Button, Empty, IconButton, LevelSlider, Segmented, Select, Toggle } from "./ui";
 import type { Run } from "./ui";
 import { useSourcePreview } from "./useSourcePreview";
+import { AdditionalAudio } from "./AdditionalAudio";
 
 export function Recording({ state, visible, run, pulse }: { state: AppState; visible: boolean; run: Run; pulse: number }) {
    const [sources, setSources] = useState<CaptureSource[]>([]);
@@ -14,7 +15,7 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
    const [saving, setSaving] = useState(false);
    const [pulsing, setPulsing] = useState(false);
    const [micLevel, setMicLevel] = useState(0);
-   const [nativeLevels, setNativeLevels] = useState({ capture: 0, microphone: 0 });
+   const [nativeLevels, setNativeLevels] = useState<AudioLevels>({ capture: 0, microphone: 0 });
    const latestPreferences = useRef(state.preferences);
    latestPreferences.current = state.preferences;
    const writes = useRef(Promise.resolve());
@@ -28,7 +29,10 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          return;
       }
       return api.onEvent((event) => {
-         if (event.type === "audio-levels" && event.levels) setNativeLevels(event.levels);
+         if (event.type === "audio-levels" && event.levels) {
+            const levels = event.levels;
+            setNativeLevels((previous) => ({ ...levels, additional: { ...previous.additional, ...levels.additional } }));
+         }
       });
    }, [visible, active]);
    const source =
@@ -146,10 +150,13 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          void context?.close();
       };
    }, [visible, state.preferences.microphone, state.preferences.microphoneDevice, audioDevices, active]);
-   const preferences = (patch: Partial<Preferences>) => {
+   const preferences = (patch: Partial<Preferences> | ((current: Preferences) => Partial<Preferences>)) => {
       writes.current = writes.current.then(async () => {
          await run(async () => {
-            const next = await api.savePreferences({ ...latestPreferences.current, ...patch });
+            const next = await api.savePreferences({
+               ...latestPreferences.current,
+               ...(typeof patch === "function" ? patch(latestPreferences.current) : patch),
+            });
             latestPreferences.current = next.preferences;
          });
       });
@@ -238,100 +245,110 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                </div>
                <div className="recording-bottom">
                   <div className="mixer">
-                     <div className="section-top">
-                        <h2>Audio</h2>
-                        <AudioLines size={16} />
-                     </div>
-                     <div className="audio-row">
-                        <IconButton
-                           label={state.preferences.captureMuted ? "Unmute capture audio" : "Mute capture audio"}
-                           disabled={!state.preferences.captureAudio}
-                           onClick={() => preferences({ captureMuted: !state.preferences.captureMuted })}
-                        >
-                           {state.preferences.captureMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-                        </IconButton>
-                        <div className="audio-row-content">
-                           <Toggle
-                              label="Capture audio"
-                              checked={state.preferences.captureAudio}
-                              onChange={(value) => preferences({ captureAudio: value })}
-                              disabled={active}
-                           />
-                           <div className="audio-caption">
-                              {state.preferences.sourceKind === "screen" ? "Sound from the selected screen" : "Sound from the selected application"}
-                           </div>
-                           <div className="meter" style={{ "--meter": `${active ? nativeLevels.capture : 0}%` } as React.CSSProperties}>
-                              <div className="meter-fill" />
-                           </div>
-                           <LevelSlider
-                              label="Capture audio level"
-                              value={state.preferences.captureVolume}
+                     <div className="mixer-scroll">
+                        <div className="section-top">
+                           <h2>Audio</h2>
+                           <AudioLines size={16} />
+                        </div>
+                        <div className="audio-row">
+                           <IconButton
+                              label={state.preferences.captureMuted ? "Unmute capture audio" : "Mute capture audio"}
                               disabled={!state.preferences.captureAudio}
-                              onCommit={(value) => preferences({ captureVolume: value })}
-                           />
-                           <span className="meter-caption">
-                              {state.preferences.captureAudio
-                                 ? state.preferences.captureMuted
-                                    ? "Muted in all recorded tracks"
-                                    : active
-                                      ? "Recording audio"
-                                      : "Meter available while recording"
-                                 : "Not recorded"}
-                           </span>
-                        </div>
-                     </div>
-                     <div className="audio-row">
-                        <IconButton
-                           label={state.preferences.microphoneMuted ? "Unmute microphone" : "Mute microphone"}
-                           disabled={!state.preferences.microphone}
-                           onClick={() => preferences({ microphoneMuted: !state.preferences.microphoneMuted })}
-                        >
-                           {state.preferences.microphoneMuted ? <MicOff size={18} /> : <Mic size={18} />}
-                        </IconButton>
-                        <div className="audio-row-content">
-                           <Toggle
-                              label="Microphone"
-                              checked={state.preferences.microphone}
-                              onChange={(value) => preferences({ microphone: value })}
-                              disabled={active}
-                           />
-                           <div className="meter" style={{ "--meter": `${active ? nativeLevels.microphone : micLevel}%` } as React.CSSProperties}>
-                              <div className="meter-fill" />
-                           </div>
-                           <LevelSlider
-                              label="Microphone level"
-                              value={state.preferences.microphoneVolume}
-                              disabled={!state.preferences.microphone}
-                              onCommit={(value) => preferences({ microphoneVolume: value })}
-                           />
-                           {state.preferences.microphone && (
-                              <select
-                                 className="mic-select"
-                                 aria-label="Microphone device"
+                              onClick={() => preferences({ captureMuted: !state.preferences.captureMuted })}
+                           >
+                              {state.preferences.captureMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                           </IconButton>
+                           <div className="audio-row-content">
+                              <Toggle
+                                 label="Capture audio"
+                                 checked={state.preferences.captureAudio}
+                                 onChange={(value) => preferences({ captureAudio: value })}
                                  disabled={active}
-                                 value={state.preferences.microphoneDevice}
-                                 onChange={(event) => preferences({ microphoneDevice: event.target.value })}
-                              >
-                                 <option value="default">System default microphone</option>
-                                 {audioDevices
-                                    .filter((item) => item.id !== "default")
-                                    .map((item) => (
-                                       <option key={item.id} value={item.id}>
-                                          {item.name}
-                                       </option>
-                                    ))}
-                              </select>
-                           )}
-                           <span className={`meter-caption ${micError && state.preferences.microphone ? "error-text" : ""}`}>
-                              {state.preferences.microphone
-                                 ? state.preferences.microphoneMuted
-                                    ? "Muted in all recorded tracks"
-                                    : active
-                                      ? "Master mix and isolated track"
-                                      : micError || "Master mix and isolated track"
-                                 : "Not recorded"}
-                           </span>
+                              />
+                              <div className="audio-caption">
+                                 {state.preferences.sourceKind === "screen" ? "Sound from the selected screen" : "Sound from the selected application"}
+                              </div>
+                              <div className="meter" style={{ "--meter": `${active ? nativeLevels.capture : 0}%` } as React.CSSProperties}>
+                                 <div className="meter-fill" />
+                              </div>
+                              <LevelSlider
+                                 label="Capture audio level"
+                                 value={state.preferences.captureVolume}
+                                 disabled={!state.preferences.captureAudio}
+                                 onCommit={(value) => preferences({ captureVolume: value })}
+                              />
+                              <span className="meter-caption">
+                                 {state.preferences.captureAudio
+                                    ? state.preferences.captureMuted
+                                       ? "Muted in all recorded tracks"
+                                       : active
+                                         ? "Recording audio"
+                                         : "Meter available while recording"
+                                    : "Not recorded"}
+                              </span>
+                           </div>
                         </div>
+                        <div className="audio-row">
+                           <IconButton
+                              label={state.preferences.microphoneMuted ? "Unmute microphone" : "Mute microphone"}
+                              disabled={!state.preferences.microphone}
+                              onClick={() => preferences({ microphoneMuted: !state.preferences.microphoneMuted })}
+                           >
+                              {state.preferences.microphoneMuted ? <MicOff size={18} /> : <Mic size={18} />}
+                           </IconButton>
+                           <div className="audio-row-content">
+                              <Toggle
+                                 label="Microphone"
+                                 checked={state.preferences.microphone}
+                                 onChange={(value) => preferences({ microphone: value })}
+                                 disabled={active}
+                              />
+                              <div className="meter" style={{ "--meter": `${active ? nativeLevels.microphone : micLevel}%` } as React.CSSProperties}>
+                                 <div className="meter-fill" />
+                              </div>
+                              <LevelSlider
+                                 label="Microphone level"
+                                 value={state.preferences.microphoneVolume}
+                                 disabled={!state.preferences.microphone}
+                                 onCommit={(value) => preferences({ microphoneVolume: value })}
+                              />
+                              {state.preferences.microphone && (
+                                 <select
+                                    className="mic-select"
+                                    aria-label="Microphone device"
+                                    disabled={active}
+                                    value={state.preferences.microphoneDevice}
+                                    onChange={(event) => preferences({ microphoneDevice: event.target.value })}
+                                 >
+                                    <option value="default">System default microphone</option>
+                                    {audioDevices
+                                       .filter((item) => item.id !== "default")
+                                       .map((item) => (
+                                          <option key={item.id} value={item.id}>
+                                             {item.name}
+                                          </option>
+                                       ))}
+                                 </select>
+                              )}
+                              <span className={`meter-caption ${micError && state.preferences.microphone ? "error-text" : ""}`}>
+                                 {state.preferences.microphone
+                                    ? state.preferences.microphoneMuted
+                                       ? "Muted in all recorded tracks"
+                                       : active
+                                         ? "Master mix and isolated track"
+                                         : micError || "Master mix and isolated track"
+                                    : "Not recorded"}
+                              </span>
+                           </div>
+                        </div>
+                        <AdditionalAudio
+                           preferences={state.preferences}
+                           active={active || state.recorder.state === "starting"}
+                           visible={visible}
+                           levels={nativeLevels.additional ?? {}}
+                           save={preferences}
+                           run={run}
+                        />
                      </div>
                   </div>
                   <div className="capture-actions">

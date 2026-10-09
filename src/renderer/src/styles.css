@@ -539,6 +539,30 @@ svg {
 .mixer .section-top {
    margin-bottom: 9px;
 }
+.mixer-scroll {
+   max-height: 300px;
+   overflow-y: auto;
+   scrollbar-gutter: stable;
+   padding-right: 4px;
+}
+.audio-source-form {
+   display: grid;
+   gap: 12px;
+   margin-top: 16px;
+   padding-top: 12px;
+}
+.audio-source-actions {
+   display: flex;
+   justify-content: flex-end;
+   gap: 8px;
+}
+.audio-add {
+   margin-top: 12px;
+   font-size: 11px;
+}
+.extra-audio .menu-wrap {
+   margin-top: 3px;
+}
 .audio-row {
    display: flex;
    align-items: flex-start;

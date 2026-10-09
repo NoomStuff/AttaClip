@@ -27,7 +27,16 @@ def collect(args):
     destination = root / "static" / info.parent.name
     destination.mkdir(parents=True, exist_ok=True)
     manifest = {"buildinfo": {"path": str(info.relative_to(root)), "sha256": collector.digest(info), "sourcePackage": record["Source"], "sourceVersion": record["Version"]}, "selection": args.packages, "packages": [], "blockers": []}
+    if args.append and (destination / "manifest.json").exists():
+        previous = json.loads((destination / "manifest.json").read_text())
+        if previous["buildinfo"] != manifest["buildinfo"]:
+            raise ValueError("Cannot append inputs from a different actual build-info file")
+        manifest["packages"] = previous["packages"]
+        manifest["blockers"] = previous["blockers"]
+        manifest["selection"] = "(?:" + previous["selection"] + ")|(?:" + args.packages + ")"
     for owner, version in selected:
+        if any(package["binaryPackage"] == owner and package["binaryVersion"] == version for package in manifest["packages"]):
+            continue
         print(f"Static source {owner}={version}", flush=True)
         try:
             binary, source_record, _, urls = collector.historical_inputs(root, owner, version)
@@ -57,4 +66,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--buildinfo", required=True)
     parser.add_argument("--packages", required=True, help="Full-match regex selecting actual installed build dependencies")
+    parser.add_argument("--append", action="store_true", help="Retain previously captured inputs from the same build-info")
     raise SystemExit(collect(parser.parse_args()))

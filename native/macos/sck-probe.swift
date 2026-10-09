@@ -24,7 +24,12 @@ final class Samples: NSObject, SCStreamOutput {
                 let x = CVPixelBufferGetWidth(image) / 2
                 let y = CVPixelBufferGetHeight(image) / 2
                 let pixel = base.advanced(by: y * CVPixelBufferGetBytesPerRow(image) + x * 4).assumingMemoryBound(to: UInt8.self)
-                colors.insert("\(pixel[2]),\(pixel[1]),\(pixel[0])")
+                if CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_32BGRA {
+                    colors.insert("\(pixel[2]),\(pixel[1]),\(pixel[0])")
+                } else {
+                    // Raw center values are enough to distinguish changing 10-bit frames.
+                    colors.insert((0..<4).map { String(format: "%02x", pixel[$0]) }.joined())
+                }
             }
         } else if type == .audio, let block = CMSampleBufferGetDataBuffer(sample) {
             audioBuffers += 1
@@ -55,7 +60,9 @@ extension Dictionary where Key == Int, Value == Int {
 @main struct Probe {
     static func main() async throws {
         let displayID = UInt32(CommandLine.arguments[1])!
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let mode = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "baseline"
+        let obsConfiguration = mode != "baseline"
+        let content = try await SCShareableContent.excludingDesktopWindows(obsConfiguration, onScreenWindowsOnly: !obsConfiguration)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw NSError(domain: "AttaClip-probe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Exact display unavailable"])
         }
@@ -69,6 +76,20 @@ extension Dictionary where Key == Int, Value == Int {
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = false
         configuration.channelCount = 2
+        if obsConfiguration {
+            guard let displayMode = CGDisplayCopyDisplayMode(displayID) else {
+                throw NSError(domain: "AttaClip-probe", code: 2, userInfo: [NSLocalizedDescriptionKey: "Display mode unavailable"])
+            }
+            configuration.width = displayMode.pixelWidth
+            configuration.height = displayMode.pixelHeight
+            configuration.minimumFrameInterval = CMTimeMultiplyByFloat64(CMTime(value: 1, timescale: 15), multiplier: 0.9)
+            configuration.queueDepth = 8
+            configuration.colorSpaceName = CGColorSpace.displayP3
+            configuration.backgroundColor = CGColor(gray: 0, alpha: 0)
+            configuration.showsCursor = true
+            configuration.excludesCurrentProcessAudio = mode != "obs-included-audio"
+            if mode != "obs-bgra" { configuration.pixelFormat = 0x6c313072 }
+        }
         let samples = Samples()
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         let queue = DispatchQueue(label: "AttaClip.private-sck-proof")
@@ -77,7 +98,12 @@ extension Dictionary where Key == Int, Value == Int {
         try await stream.startCapture()
         try await Task.sleep(nanoseconds: 2_500_000_000)
         try await stream.stopCapture()
-        let data = try JSONSerialization.data(withJSONObject: samples.result(), options: [.sortedKeys])
+        var result = samples.result()
+        result["mode"] = mode
+        result["width"] = configuration.width
+        result["height"] = configuration.height
+        result["pixelFormat"] = configuration.pixelFormat
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
         FileHandle.standardOutput.write(data + Data([10]))
     }
 }

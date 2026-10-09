@@ -1,4 +1,4 @@
-import { copyFile, cp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -84,6 +84,13 @@ await writeFile(
          platform: "Ubuntu 24.04 x64, X11",
          modules,
          build: "scripts/build-native-linux.ts",
+         recorder: {
+            path: "attaclip-recorder",
+            sha256: createHash("sha256")
+               .update(await readFile(path.join(runtime, "attaclip-recorder")))
+               .digest("hex"),
+            size: (await stat(path.join(runtime, "attaclip-recorder"))).size,
+         },
          libraries: recorded,
          sourceHashes: Object.fromEntries(
             await Promise.all(

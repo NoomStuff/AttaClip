@@ -3,6 +3,8 @@
 #include <cmath>
 #include <d3d11.h>
 #include <iostream>
+#include <mmsystem.h>
+#include <vector>
 #include <windows.h>
 LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_DESTROY) {
@@ -11,7 +13,7 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
   }
   return DefWindowProcW(window, message, w, l);
 }
-int main() {
+int main(int argc, char **argv) {
   WNDCLASSW klass{};
   klass.lpfnWndProc = procedure;
   klass.hInstance = GetModuleHandleW(nullptr);
@@ -21,6 +23,31 @@ int main() {
                               L"AttaClip isolated Direct3D capture proof",
                               WS_OVERLAPPEDWINDOW, 80, 80, 660, 400, nullptr,
                               nullptr, klass.hInstance, nullptr);
+  if (argc > 1)
+    SetWindowTextA(window, argv[1]);
+  HWAVEOUT sound = nullptr;
+  WAVEHDR header{};
+  std::vector<int16_t> tone;
+  if (argc > 2) {
+    int frequency = atoi(argv[2]);
+    tone.resize(48000 * 2);
+    for (size_t index = 0; index < tone.size() / 2; index++)
+      tone[index * 2] = tone[index * 2 + 1] =
+          int16_t(1000 * std::sin(2 * 3.141592653589793 * frequency *
+                                  double(index) / 48000));
+    WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
+    if (waveOutOpen(&sound, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) !=
+        MMSYSERR_NOERROR)
+      return 3;
+    header.lpData = reinterpret_cast<LPSTR>(tone.data());
+    header.dwBufferLength = DWORD(tone.size() * sizeof(int16_t));
+    header.dwFlags = WHDR_BEGINLOOP | WHDR_ENDLOOP;
+    header.dwLoops = 120;
+    if (waveOutPrepareHeader(sound, &header, sizeof(header)) !=
+            MMSYSERR_NOERROR ||
+        waveOutWrite(sound, &header, sizeof(header)) != MMSYSERR_NOERROR)
+      return 4;
+  }
   DXGI_SWAP_CHAIN_DESC desc{};
   desc.BufferCount = 2;
   desc.BufferDesc.Width = 640;
@@ -63,5 +90,10 @@ int main() {
   context->Release();
   device->Release();
   swap->Release();
+  if (sound) {
+    waveOutReset(sound);
+    waveOutUnprepareHeader(sound, &header, sizeof(header));
+    waveOutClose(sound);
+  }
   return 0;
 }
