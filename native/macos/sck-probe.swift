@@ -68,6 +68,8 @@ extension Dictionary where Key == Int, Value == Int {
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
+        // SCK assigns this CF object without retaining it.
+        let background = CGColor(gray: 0, alpha: 0)
         configuration.width = 640
         configuration.height = 360
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 15)
@@ -85,7 +87,7 @@ extension Dictionary where Key == Int, Value == Int {
             configuration.minimumFrameInterval = CMTimeMultiplyByFloat64(CMTime(value: 1, timescale: 15), multiplier: 0.9)
             configuration.queueDepth = 8
             configuration.colorSpaceName = CGColorSpace.displayP3
-            configuration.backgroundColor = CGColor(gray: 0, alpha: 0)
+            configuration.backgroundColor = background
             configuration.showsCursor = true
             configuration.excludesCurrentProcessAudio = mode != "obs-included-audio"
             if mode != "obs-bgra" { configuration.pixelFormat = 0x6c313072 }
@@ -98,6 +100,7 @@ extension Dictionary where Key == Int, Value == Int {
         try await stream.startCapture()
         try await Task.sleep(nanoseconds: 2_500_000_000)
         try await stream.stopCapture()
+        withExtendedLifetime(background) {}
         var result = samples.result()
         result["mode"] = mode
         result["width"] = configuration.width

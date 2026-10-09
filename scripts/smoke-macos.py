@@ -106,11 +106,17 @@ try:
     direct_results = []
     direct_logs = []
     for mode in ("baseline", "obs-bgra", "obs-l10r", "obs-included-audio"):
-        direct = subprocess.run([str(probe), str(identity["displayId"]), mode], capture_output=True, text=True, timeout=15)
-        direct_logs.append(mode + "\n" + direct.stderr)
+        try:
+            direct = subprocess.run([str(probe), str(identity["displayId"]), mode], capture_output=True, text=True, timeout=15)
+            direct_logs.append(mode + "\n" + direct.stderr)
+            if direct.returncode == 0:
+                direct_results.append(json.loads(direct.stdout))
+            else:
+                direct_results.append(dict(mode=mode, exitCode=direct.returncode, error=direct.stderr))
+        except subprocess.TimeoutExpired:
+            direct_logs.append(mode + "\nTimed out after 15 seconds")
+            direct_results.append(dict(mode=mode, error="Timed out after 15 seconds"))
         (folder / "direct-sck.log").write_text("\n".join(direct_logs))
-        assert direct.returncode == 0, direct.stderr
-        direct_results.append(json.loads(direct.stdout))
         (folder / "direct-sck.json").write_text(json.dumps(direct_results, indent=2))
     helper = launch([str(runtime / "attaclip-recorder"), str(runtime)], "native", True)
     def read():
