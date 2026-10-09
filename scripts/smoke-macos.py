@@ -90,6 +90,11 @@ try:
     (folder / "fixture.json").write_text(json.dumps(identity, indent=2))
     assert identity["screenPermission"], "Hosted macOS runner has no Screen Recording permission"
     assert identity["audioStarted"], "The runner could not play the generated tone, so audio capture cannot be proven"
+    fixture_health = []
+    def read_fixture():
+        for line in fixture.stdout:
+            fixture_health.append(json.loads(line))
+    threading.Thread(target=read_fixture, daemon=True).start()
     helper = launch([str(runtime / "attaclip-recorder"), str(runtime)], "native", True)
     def read():
         for line in helper.stdout:
@@ -101,7 +106,7 @@ try:
     candidate = next((item for item in candidate_event["windows"] if item["id"] == f"window:{identity['windowId']}:0"), None)
     assert candidate and candidate["pid"] == fixture.pid and candidate["executable"], candidate_event
     media = []
-    for kind in ("app", "screen"):
+    for kind in ("screen", "app"):
         source_id = f"window:{identity['windowId']}:0" if kind == "app" else f"screen:{identity['displayId']}:0"
         start_index = len(events)
         command(dict(action="start", sourceKind=kind, sourceId=source_id, displayId=str(identity["displayId"]), sourceName="Synthetic Mac fixture", quality="custom",
@@ -122,6 +127,7 @@ try:
             saved = wait(lambda event: event.get("requestId") == request and event["event"] in ("saved", "error"), 40)
             assert saved["event"] == "saved", saved
             media.append(dict(kind=kind, encoder=recording["encoder"], **validate(file, identity["audioStarted"])))
+            (folder / "partial-proof.json").write_text(json.dumps(dict(captures=media, fixtureAudioHealth=fixture_health), indent=2))
     helper.stdin.write(json.dumps(dict(action="exit")) + "\n")
     helper.stdin.flush()
     helper.wait(timeout=15)
@@ -133,6 +139,8 @@ try:
     (root / ".cache/macos-capture/latest-proof.json").write_text(json.dumps(proof, indent=2))
     print(json.dumps(proof, indent=2))
 finally:
+    (folder / "fixture-health.json").write_text(json.dumps(locals().get("fixture_health", []), indent=2))
+    (folder / "native-events.json").write_text(json.dumps(events, indent=2))
     for child in reversed(processes):
         if child.poll() is None:
             child.terminate()

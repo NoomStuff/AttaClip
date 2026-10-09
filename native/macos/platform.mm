@@ -158,7 +158,9 @@ obs_source_t *createCapture(const nlohmann::json &configuration) {
   obs_data_set_int(settings, "type", kind == "screen" ? 0 : 1);
   obs_data_set_int(settings, "window", window);
   obs_data_set_bool(settings, "show_cursor", true);
-  obs_data_set_bool(settings, "hide_obs", false);
+  // Use ScreenCaptureKit's application filter for screen audio. The recorder
+  // itself has no visible window. Excluding it does not hide the Electron UI.
+  obs_data_set_bool(settings, "hide_obs", true);
   obs_data_set_bool(settings, "show_hidden_windows", false);
   if (display) {
     CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);

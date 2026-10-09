@@ -28,6 +28,8 @@ window.level = .normal
 window.orderFrontRegardless()
 let engine = AVAudioEngine()
 var phase = 0.0
+let renderLock = NSLock()
+var renderedFrames: UInt64 = 0
 let source = AVAudioSourceNode { _, _, frames, buffers in
     let list = UnsafeMutableAudioBufferListPointer(buffers)
     for frame in 0..<Int(frames) {
@@ -40,6 +42,9 @@ let source = AVAudioSourceNode { _, _, frames, buffers in
             for channel in 0..<channels { samples[frame * channels + channel] = value }
         }
     }
+    renderLock.lock()
+    renderedFrames += UInt64(frames)
+    renderLock.unlock()
     return noErr
 }
 engine.attach(source)
@@ -59,6 +64,16 @@ let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
     view.count += 1
     view.needsDisplay = true
 }
+let healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+    renderLock.lock()
+    let frames = renderedFrames
+    renderLock.unlock()
+    let health: [String: Any] = ["event": "audio-health", "engineRunning": engine.isRunning, "renderedFrames": frames]
+    if let data = try? JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]) {
+        FileHandle.standardOutput.write(data + Data([10]))
+    }
+}
 app.run()
 timer.invalidate()
+healthTimer.invalidate()
 engine.stop()

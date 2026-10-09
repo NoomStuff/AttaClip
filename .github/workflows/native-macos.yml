@@ -54,6 +54,9 @@ jobs:
               name: macOS-native-capture-proof
               path: |
                  .cache/macos-capture/**/proof.json
+                 .cache/macos-capture/**/partial-proof.json
+                 .cache/macos-capture/**/fixture-health.json
+                 .cache/macos-capture/**/native-events.json
                  .cache/macos-capture/**/fixture.json
                  .cache/macos-capture/**/*.log
                  .cache/macos-native/link-proof.txt
@@ -61,5 +64,6 @@ jobs:
                  .cache/macos-native/build/CMakeFiles/CMakeConfigureLog.yaml
                  .cache/macos-packaged/proof.json
                  .cache/macos-packaged/fixture.log
+                 .cache/macos-packaged/fixture-health.json
                  resources/recorder/provenance.json
               retention-days: 7

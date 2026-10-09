@@ -20,9 +20,18 @@ const binary = path.join(folder, "fixture");
 await run("swiftc", [path.resolve("native/macos/fixture.swift"), "-o", binary]);
 const fixture = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
 const fixtureErrors: string[] = [];
+const fixtureHealth: Array<{ engineRunning: boolean; renderedFrames: number }> = [];
 fixture.stderr.on("data", (data: Buffer) => fixtureErrors.push(data.toString()));
 const identity = await new Promise<{ windowId: number; audioStarted: boolean }>((resolve, reject) => {
    const input = createInterface({ input: fixture.stdout });
+   input.on("line", (line) => {
+      try {
+         const value = z.object({ event: z.literal("audio-health"), engineRunning: z.boolean(), renderedFrames: z.number() }).safeParse(JSON.parse(line));
+         if (value.success) fixtureHealth.push(value.data);
+      } catch {
+         // Initial identity is handled separately; fixture diagnostics cannot alter capture.
+      }
+   });
    const timeout = setTimeout(() => {
       fixture.kill();
       reject(new Error("The synthetic Mac fixture did not start"));
@@ -162,6 +171,7 @@ try {
    console.log("Actual packaged macOS application capture, hidden saves, full decoding, and 1 MB sharing passed.");
 } finally {
    await writeFile(path.join(evidence, "fixture.log"), fixtureErrors.join(""));
+   await writeFile(path.join(evidence, "fixture-health.json"), JSON.stringify(fixtureHealth, null, 2));
    if (desktop) await desktop.close();
    fixture.kill();
 }
