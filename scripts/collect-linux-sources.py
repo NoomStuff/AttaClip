@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import urllib.request
 import urllib.parse
+from controlled_wayland_sources import MODULE, copy_inputs, verify_inputs, check_header_packages
 
 
 def run(args):
@@ -134,11 +135,11 @@ def deb_data(archive):
     return subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(archive)])
 
 
-def match_member(data, filename, expected):
+def match_member(data, filename, expected, exact=False):
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         members = {member.name.removeprefix("./"): member for member in archive.getmembers()}
         for name, member in members.items():
-            if Path(name).name != filename:
+            if (name != filename if exact else Path(name).name != filename):
                 continue
             seen = set()
             while member.issym() or member.islnk():
@@ -230,6 +231,19 @@ def check(args):
         blockers.append("Recorder provenance changed after source collection")
     proven = {}
     notices = {}
+    controlled = manifest.get("controlledModules", [])
+    try:
+        provenance = json.loads((evidence_path(root, "evidence/native-provenance.json") if packet else stage / "provenance.json").read_text())
+        if len(controlled) != (1 if provenance.get("waylandModule") else 0):
+            raise ValueError("Controlled module inventory differs from staged native provenance")
+        for module in controlled:
+            actual = staged.get(module["path"]) if packet else digest(evidence_path(stage, module["path"]))
+            size = next((file["size"] for file in packet["staged"] if file["path"] == "resources/recorder/" + module["path"]), None) if packet else evidence_path(stage, module["path"]).stat().st_size
+            proof = verify_inputs(root, module, provenance, actual, size)
+            check_header_packages(proof, manifest["packages"], lambda package: deb_data(evidence_path(root, package["binaryArchive"]["path"])), match_member)
+            proven[module["path"]] = actual
+    except Exception as error:
+        blockers.append("Controlled module: " + str(error))
     for package in manifest["packages"]:
         try:
             archive = evidence_path(root, package["binaryArchive"]["path"])
@@ -319,6 +333,7 @@ def collect(args):
         (apt / "update.log").write_text(run(["apt-get", *options, "update"]))
     manifest = {"version": 1, "stage": str(stage), "provenanceSha256": digest(stage / "provenance.json"), "packages": [], "blockers": [], "staticDependencyReview": "pending"}
     provenance = json.loads((stage / "provenance.json").read_text())
+    manifest["controlledModules"] = copy_inputs(Path(__file__).resolve().parent.parent, root, provenance)
     ldconfig = run(["/sbin/ldconfig", "-p"])
     candidates = [Path(line.rsplit(" => ", 1)[1]) for line in ldconfig.splitlines() if " => " in line]
     candidates.extend([Path("/usr/bin/obs-ffmpeg-mux"), Path("/usr/lib/x86_64-linux-gnu/libobs-opengl.so")])
@@ -328,6 +343,10 @@ def collect(args):
     for file in candidates:
         by_name.setdefault(file.name, []).append(file)
     groups = {}
+    if provenance.get("waylandModule"):
+        proof = provenance["waylandModule"]
+        for item in [*proof["headers"], *proof["linkerInputs"], *proof["compilerInputs"]]:
+            groups.setdefault((item["binaryPackage"], item["binaryVersion"]), [])
     for file in Path("/usr/share/common-licenses").iterdir():
         if file.is_file():
             owner = run(["dpkg-query", "-S", str(file.resolve())]).split(": ", 1)[0]
@@ -340,6 +359,12 @@ def collect(args):
             actual = digest(file)
             if relative in expected_files and expected_files[relative] != actual:
                 raise ValueError(f"Staged file changed: {relative}")
+            if relative == MODULE and manifest["controlledModules"]:
+                # Only the exact source-replayed, source-package-bound module is exempt.
+                module = manifest["controlledModules"][0]
+                if actual != module["sha256"] or file.stat().st_size != module["size"]:
+                    raise ValueError("Controlled staged module changed")
+                continue
             original = next((candidate.resolve() for candidate in by_name.get(file.name, []) if candidate.exists() and digest(candidate) == actual), None)
             if original is None:
                 manifest["blockers"].append(f"No identical installed package file for {relative}")
@@ -440,6 +465,12 @@ def collect(args):
             verified = next((other for other in manifest["packages"] if other["binaryPackage"] == notice["package"] and other["copyright"]["debMember"] and other["copyright"]["sha256"] == notice["sha256"]), None)
             if not verified:
                 manifest["blockers"].append(f"Copyright owning package is not verified for {package['binaryPackage']}")
+    try:
+        for module in manifest.get("controlledModules", []):
+            proof = verify_inputs(root, module, provenance, digest(evidence_path(stage, module["path"])), evidence_path(stage, module["path"]).stat().st_size)
+            check_header_packages(proof, manifest["packages"], lambda package: deb_data(evidence_path(root, package["binaryArchive"]["path"])), match_member)
+    except Exception as error:
+        manifest["blockers"].append("Controlled module: " + str(error))
     manifest["collectionComplete"] = not manifest["blockers"]
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Captured {len(manifest['packages'])} exact binary/source package records. {len(manifest['blockers'])} blockers. Static dependency review remains pending.")

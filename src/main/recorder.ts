@@ -41,6 +41,7 @@ interface NativeMessage {
    sourceKind?: "screen" | "app" | "waiting";
    encoders?: string[];
    captureBackend?: string;
+   applicationBackend?: string;
    sourceKinds?: unknown;
    portalPicker?: boolean;
 }
@@ -72,6 +73,7 @@ export class Recorder {
    private focused = new Map<string, number>();
    private encoders: string[] = [];
    private captureBackend: "wayland-portal" | undefined;
+   private applicationBackend: "xwayland" | undefined;
    private sourceKinds: SourceKind[] = ["screen", "app", "auto"];
    private portalPicker = false;
    constructor(options: RecorderOptions) {
@@ -138,6 +140,7 @@ export class Recorder {
             sourceKinds: [...this.sourceKinds],
             portalPicker: this.portalPicker,
             ...(this.captureBackend ? { captureBackend: this.captureBackend } : {}),
+            ...(this.applicationBackend ? { applicationBackend: this.applicationBackend } : {}),
          };
       } catch (failure) {
          return {
@@ -159,6 +162,11 @@ export class Recorder {
          const gameName = games.find((game) => game.id === candidate.id)?.gameName;
          return { ...candidate, ...(gameName ? { gameName } : {}) };
       });
+   }
+   async applicationCandidates(): Promise<GameCandidate[]> {
+      if (!this.current.supported) return [];
+      await this.initialize();
+      return (await this.candidates()).filter((candidate) => candidate.pid !== process.pid);
    }
    private candidates(): Promise<GameCandidate[]> {
       if (this.candidatesPending) return this.candidatesPending;
@@ -344,9 +352,13 @@ export class Recorder {
          this.current.supported = true;
          this.encoders = Array.isArray(value.encoders) ? value.encoders.filter((value) => typeof value === "string" && value.length < 200) : [];
          this.captureBackend = value.captureBackend === "wayland-portal" ? "wayland-portal" : undefined;
+         this.applicationBackend = this.captureBackend && value.applicationBackend === "xwayland" ? "xwayland" : undefined;
          this.sourceKinds = Array.isArray(value.sourceKinds)
             ? value.sourceKinds.filter((kind): kind is SourceKind => kind === "screen" || kind === "app" || kind === "auto")
-            : ["screen", "app", "auto"];
+            : this.captureBackend
+              ? ["screen"]
+              : ["screen", "app", "auto"];
+         if (this.captureBackend && !this.applicationBackend) this.sourceKinds = this.sourceKinds.filter((kind) => kind === "screen");
          this.portalPicker = value.portalPicker === true;
          this.readyResolve?.();
          this.readyResolve = null;

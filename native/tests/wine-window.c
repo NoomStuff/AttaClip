@@ -1,7 +1,38 @@
 // SPDX-License-Identifier: MIT
 // Private Win32 pixels for actual Wine executable and capture verification.
-#include <stdio.h>
 #include <windows.h>
+
+#include <math.h>
+#include <mmsystem.h>
+#include <stdio.h>
+
+DWORD WINAPI audio(LPVOID unused) {
+  WAVEFORMATEX format = {WAVE_FORMAT_PCM, 2, 48000, 48000 * 4, 4, 16, 0};
+  HANDLE done = CreateEventA(0, FALSE, FALSE, 0);
+  if (!done)
+    return 2;
+  HWAVEOUT stream;
+  if (waveOutOpen(&stream, WAVE_MAPPER, &format, (DWORD_PTR)done, 0,
+                  CALLBACK_EVENT) != MMSYSERR_NOERROR)
+    return 3;
+  short samples[4800 * 2];
+  WAVEHDR header = {0};
+  header.lpData = (LPSTR)samples;
+  header.dwBufferLength = sizeof(samples);
+  if (waveOutPrepareHeader(stream, &header, sizeof(header)) != MMSYSERR_NOERROR)
+    return 4;
+  unsigned long long position = 0;
+  for (;;) {
+    for (int i = 0; i < 4800; i++, position++)
+      samples[i * 2] = samples[i * 2 + 1] =
+          (short)(2200 * sin(2 * 3.141592653589793 * 777 * position / 48000));
+    ResetEvent(done);
+    if (waveOutWrite(stream, &header, sizeof(header)) != MMSYSERR_NOERROR)
+      return 5;
+    if (WaitForSingleObject(done, 5000) != WAIT_OBJECT_0)
+      return 6;
+  }
+}
 LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
   static int frame;
   if (message == WM_DESTROY) {
@@ -39,6 +70,7 @@ int main(void) {
   HWND window = CreateWindowA(
       klass.lpszClassName, "AttaClip private Wine proof", WS_OVERLAPPEDWINDOW,
       30, 30, 340, 220, 0, 0, klass.hInstance, 0);
+  CreateThread(0, 0, audio, 0, 0, 0);
   ShowWindow(window, SW_SHOW);
   SetTimer(window, 1, 30, 0);
   printf("%lu\n", GetCurrentProcessId());

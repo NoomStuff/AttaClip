@@ -17,7 +17,7 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
    const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
    const qualityChosen = useRef(false);
    useEffect(() => {
-      if (step !== 3 || capabilities) return;
+      if (capabilities) return;
       let disposed = false;
       void api
          .recordingCapabilities()
@@ -115,13 +115,15 @@ export function Onboarding({ state, run }: { state: AppState; run: Run }) {
                         <h2>What would you like to capture?</h2>
                         <p>
                            {portal
-                              ? "Choose a screen in the system picker when recording starts. Application and Auto capture are unavailable in this Wayland session."
+                              ? capabilities?.applicationBackend === "xwayland"
+                                 ? "Choose a screen through the system picker, or capture an XWayland application. Native Wayland apps are unavailable."
+                                 : "Choose a screen in the system picker when recording starts. Application and Auto capture are unavailable in this Wayland session."
                               : "Start with a screen, choose an application, or follow a game automatically. You can switch later."}
                         </p>
                         <Segmented
                            label="Setup capture source"
                            value={draft.sourceKind}
-                           values={sourceChoices(sources)}
+                           values={sourceChoices(sources, capabilities)}
                            onChange={(kind) => {
                               change("sourceKind", kind);
                               change("sourceId", sources.find((item) => item.kind === kind)?.id ?? draft.sourceId);

@@ -96,8 +96,28 @@ $form.Dispose()
       await page.getByRole("button", { name: "Library", exact: true }).click();
       await page.waitForTimeout(1500);
       expect((await page.evaluate(() => window.attaClip.state())).recorder.sourceId).toBe(candidate.id);
-      await page.evaluate(() => window.attaClip.saveClip());
+      await desktop.evaluate(({ BrowserWindow }) => {
+         BrowserWindow.getAllWindows()
+            .find((item) => item.getTitle() === "AttaClip")
+            ?.hide();
+      });
+      const second = spawn(resolve("node_modules/electron/dist/electron.exe"), [resolve("."), "--clip"], {
+         windowsHide: true,
+         stdio: "ignore",
+         env: { ...process.env, ATTACLIP_TEST: "1", ATTACLIP_PROFILE: profile, ATTACLIP_COLLECTION: collection },
+      });
+      await new Promise<void>((resolve, reject) => {
+         second.on("error", reject);
+         second.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`Clip command exited ${code}`))));
+      });
       await expect.poll(async () => (await page.evaluate(() => window.attaClip.state())).clips.length, { timeout: 20_000 }).toBe(1);
+      expect(
+         await desktop.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+               .find((item) => item.getTitle() === "AttaClip")
+               ?.isVisible()
+         )
+      ).toBe(false);
       const clip = (await page.evaluate(() => window.attaClip.state())).clips[0]!;
       expect(clip.source).toBe(title);
       expect(clip.duration).toBeGreaterThan(3);

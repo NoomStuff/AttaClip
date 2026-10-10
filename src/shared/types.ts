@@ -29,6 +29,7 @@ export interface RecordingCapabilities {
    recommended: "low" | "standard";
    message: string;
    captureBackend?: "wayland-portal";
+   applicationBackend?: "xwayland";
    sourceKinds?: SourceKind[];
    portalPicker?: boolean;
 }

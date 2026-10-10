@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AppWindow, AudioLines, Clapperboard, Circle, CircleStop, Mic, MicOff, Monitor, RefreshCw, Volume2, VolumeX, WandSparkles } from "lucide-react";
-import type { AppState, AudioLevels, CaptureSource, GameCandidate, Preferences, SourceKind } from "../../shared/types";
+import type { AppState, AudioLevels, CaptureSource, GameCandidate, Preferences, RecordingCapabilities, SourceKind } from "../../shared/types";
 import { api, Button, Empty, IconButton, LevelSlider, Segmented, Select, Toggle } from "./ui";
 import type { Run } from "./ui";
 import { useSourcePreview } from "./useSourcePreview";
@@ -9,6 +9,7 @@ import { portalScreenId, sourceChoices } from "../../shared/capture-policy";
 
 export function Recording({ state, visible, run, pulse }: { state: AppState; visible: boolean; run: Run; pulse: number }) {
    const [sources, setSources] = useState<CaptureSource[]>([]);
+   const [capabilities, setCapabilities] = useState<RecordingCapabilities | null>(null);
    const [games, setGames] = useState<GameCandidate[]>([]);
    const [addingGame, setAddingGame] = useState(false);
    const [newGameId, setNewGameId] = useState("");
@@ -42,10 +43,15 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          : (sources.find((item) => item.id === state.preferences.sourceId) ??
            (!state.preferences.sourceId && state.preferences.sourceKind === "screen" ? sources.find((item) => item.kind === "screen") : undefined));
    const portal = sources.some((item) => item.id === portalScreenId);
-   const preview = useSourcePreview(source?.id === portalScreenId ? undefined : source?.id, visible && state.preferences.setupComplete);
+   const previewUnavailable = capabilities?.captureBackend === "wayland-portal" || source?.id === portalScreenId;
+   const preview = useSourcePreview(previewUnavailable ? undefined : source?.id, visible && state.preferences.setupComplete);
    const refresh = async () => {
       setLoading(true);
-      await run(async () => setSources(await api.sources()));
+      await run(async () => {
+         const [choices, capability] = await Promise.all([api.sources(), api.recordingCapabilities()]);
+         setSources(choices);
+         setCapabilities(capability);
+      });
       setLoading(false);
    };
    useEffect(() => {
@@ -75,8 +81,11 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
       let gone = false;
       const fetch = async () => {
          try {
-            const result = await api.sources();
-            if (!gone) setSources(result);
+            const [result, capability] = await Promise.all([api.sources(), api.recordingCapabilities()]);
+            if (!gone) {
+               setSources(result);
+               setCapabilities(capability);
+            }
          } catch {
             /* Main action errors remain visible; source refresh retries. */
          }
@@ -195,11 +204,15 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
          <div className="recording-layout">
             <div className="recording-main">
                <div className="preview-surface">
-                  {source?.id === portalScreenId ? (
+                  {source && previewUnavailable ? (
                      <Empty
                         icon={<Monitor size={38} />}
-                        title="Screen capture"
-                        detail="Choose a screen in the system picker when you start recording. Live preview is unavailable for this capture mode."
+                        title={source.kind === "screen" ? "Screen capture" : source.name}
+                        detail={
+                           source.kind === "screen"
+                              ? "Choose a screen in the system picker when you start recording. Live preview is unavailable in this session."
+                              : "This application records directly. Live preview is unavailable in this Wayland session."
+                        }
                      />
                   ) : source ? (
                      <>
@@ -388,8 +401,14 @@ export function Recording({ state, visible, run, pulse }: { state: AppState; vis
                      <RefreshCw size={15} className={loading ? "spin" : ""} />
                   </IconButton>
                </div>
-               <Segmented label="Source type" value={state.preferences.sourceKind} values={sourceChoices(sources)} onChange={switchKind} />
-               {portal && <p className="source-empty">Application and Auto capture are unavailable in this Wayland session.</p>}
+               <Segmented label="Source type" value={state.preferences.sourceKind} values={sourceChoices(sources, capabilities)} onChange={switchKind} />
+               {portal && (
+                  <p className="source-empty">
+                     {capabilities?.applicationBackend === "xwayland"
+                        ? "App and Auto support XWayland applications. Native Wayland apps are unavailable."
+                        : "Application and Auto capture are unavailable in this Wayland session."}
+                  </p>
+               )}
                {state.preferences.sourceKind === "auto" ? (
                   <div className="auto-source">
                      <WandSparkles size={25} />

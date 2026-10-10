@@ -25,8 +25,8 @@
 #ifdef __linux__
 #include "linux-app-audio.hpp"
 #include "linux-process.hpp"
-#include "x11-compat.hpp"
 #include "wayland/platform.hpp"
+#include "x11-compat.hpp"
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
 #include <pthread.h>
@@ -199,8 +199,8 @@ std::string utf8(const std::wstring &value) {
 }
 std::string processArguments(HANDLE process) {
   using QueryProcess = LONG(NTAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-  static const auto query = reinterpret_cast<QueryProcess>(
-      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  static const auto query = reinterpret_cast<QueryProcess>(GetProcAddress(
+      GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
   if (!query)
     return {};
   struct UnicodeText {
@@ -213,7 +213,8 @@ std::string processArguments(HANDLE process) {
   if (required < sizeof(UnicodeText) || required > 128 * 1024)
     return {};
   std::vector<uint8_t> bytes(required);
-  if (query(process, commandLineInformation, bytes.data(), required, &required) < 0)
+  if (query(process, commandLineInformation, bytes.data(), required,
+            &required) < 0)
     return {};
   UnicodeText text{};
   memcpy(&text, bytes.data(), sizeof(text));
@@ -575,7 +576,8 @@ public:
       capture = nullptr;
     }
 #ifdef __linux__
-    std::atomic_store(&portalCapture, std::shared_ptr<attaclip::wayland::Capture>{});
+    std::atomic_store(&portalCapture,
+                      std::shared_ptr<attaclip::wayland::Capture>{});
 #endif
     if (desktop) {
       obs_source_release(desktop);
@@ -796,8 +798,10 @@ public:
       }
 #endif
 #ifdef __APPLE__
-      auto error = attaclip::macos::audioError(extra.source, extra.window, extra.pid);
-      if (!error.empty()) return extra.name + ": " + error;
+      auto error =
+          attaclip::macos::audioError(extra.source, extra.window, extra.pid);
+      if (!error.empty())
+        return extra.name + ": " + error;
 #endif
     }
     return {};
@@ -890,7 +894,8 @@ public:
 #elif defined(__APPLE__)
         obs_data_release(data);
         data = nullptr;
-        extra.source = attaclip::macos::createApplicationAudio(extra.window, extra.pid, extra.name);
+        extra.source = attaclip::macos::createApplicationAudio(
+            extra.window, extra.pid, extra.name);
 #else
         obs_data_release(data);
         throw std::runtime_error("Additional application audio is not "
@@ -904,28 +909,32 @@ public:
           obs_data_release(data);
           data = nullptr;
           type = nullptr;
-          if (device != "system") throw std::runtime_error("Choose System audio. Individual output-device capture is unavailable on macOS");
+          if (device != "system")
+            throw std::runtime_error(
+                "Choose System audio. Individual output-device capture is "
+                "unavailable on macOS");
           extra.source = attaclip::macos::createSystemAudio(extra.name);
         } else {
           attaclip::macos::requireMicrophonePermission();
 #endif
-        auto *properties = obs_get_source_properties(type);
-        auto *devices =
-            properties ? obs_properties_get(properties, "device_id") : nullptr;
-        bool found = false;
-        if (devices)
-          for (size_t index = 0; index < obs_property_list_item_count(devices);
-               index++)
-            if (device == obs_property_list_item_string(devices, index) &&
-                !obs_property_list_item_disabled(devices, index))
-              found = true;
-        obs_properties_destroy(properties);
-        if (!found) {
-          obs_data_release(data);
-          throw std::runtime_error(
-              "The additional audio device is unavailable");
-        }
-        obs_data_set_string(data, "device_id", device.c_str());
+          auto *properties = obs_get_source_properties(type);
+          auto *devices = properties
+                              ? obs_properties_get(properties, "device_id")
+                              : nullptr;
+          bool found = false;
+          if (devices)
+            for (size_t index = 0;
+                 index < obs_property_list_item_count(devices); index++)
+              if (device == obs_property_list_item_string(devices, index) &&
+                  !obs_property_list_item_disabled(devices, index))
+                found = true;
+          obs_properties_destroy(properties);
+          if (!found) {
+            obs_data_release(data);
+            throw std::runtime_error(
+                "The additional audio device is unavailable");
+          }
+          obs_data_set_string(data, "device_id", device.c_str());
 #ifdef __APPLE__
         }
 #endif
@@ -1339,9 +1348,8 @@ public:
       if (kind == "screen" && c.value("sourceId", "") != "portal:screen")
         throw std::runtime_error(
             "Wayland screen recording requires the system screen picker");
-      if (kind != "screen" &&
-          (!candidateConnection ||
-           xcb_connection_has_error(candidateConnection)))
+      if (kind != "screen" && (!candidateConnection ||
+                               xcb_connection_has_error(candidateConnection)))
         throw std::runtime_error(
             "XWayland application capture is unavailable in this session");
     }
@@ -1931,7 +1939,8 @@ public:
 Recorder *recorder = nullptr;
 int main(int argc, char **argv) {
   try {
-    std::filesystem::path root = std::filesystem::absolute(argc > 1 ? argv[1] : ".");
+    std::filesystem::path root =
+        std::filesystem::absolute(argc > 1 ? argv[1] : ".");
 #ifdef __APPLE__
     attaclip::macos::prepareProcess(root);
     muxExecutable = attaclip::macos::muxPath();
@@ -1984,7 +1993,8 @@ int main(int argc, char **argv) {
     obsShutdown.initialized = true;
     if (!attaclip::wayland::enabled()) {
       if (!std::getenv("DISPLAY"))
-        throw std::runtime_error("An X11 display is required for native recording");
+        throw std::runtime_error(
+            "An X11 display is required for native recording");
       auto *display = XOpenDisplay(nullptr);
       if (!display)
         throw std::runtime_error("The X11 display could not be opened");
@@ -1997,7 +2007,8 @@ int main(int argc, char **argv) {
         xcb_disconnect(candidateConnection);
         candidateConnection = nullptr;
         if (!attaclip::wayland::enabled())
-          throw std::runtime_error("X11 application identity connection failed");
+          throw std::runtime_error(
+              "X11 application identity connection failed");
       }
     }
     muxExecutable = (root / "obs-ffmpeg-mux").string();
@@ -2048,8 +2059,9 @@ int main(int argc, char **argv) {
         obs_init_module(module);
     }
     if (attaclip::wayland::enabled()) {
-      attaclip::wayland::loadModule((root / "obs-plugins/linux-pipewire.so").string(),
-                                  (root / "data/obs-plugins/linux-pipewire").string());
+      attaclip::wayland::loadModule(
+          (root / "obs-plugins/linux-pipewire.so").string(),
+          (root / "data/obs-plugins/linux-pipewire").string());
       if (!attaclip::wayland::screenAvailable())
         throw std::runtime_error("The system portal cannot share a screen");
     }
@@ -2092,8 +2104,8 @@ int main(int argc, char **argv) {
       Recorder r;
       recorder = &r;
       json ready = {{"event", "ready"},
-            {"version", obs_get_version_string()},
-            {"encoders", hardwareEncoders()}};
+                    {"version", obs_get_version_string()},
+                    {"encoders", hardwareEncoders()}};
 #ifdef __linux__
       if (attaclip::wayland::enabled()) {
         ready["captureBackend"] = "wayland-portal";
@@ -2163,22 +2175,23 @@ int main(int argc, char **argv) {
               throw std::runtime_error("Choose input or output audio devices");
 #ifdef __APPLE__
             if (kind == "output")
-              emit({{"event", "audio-devices"}, {"devices", attaclip::macos::outputDevices()}});
+              emit({{"event", "audio-devices"},
+                    {"devices", attaclip::macos::outputDevices()}});
             else {
 #endif
-            auto *props = obs_get_source_properties(
-                kind == "input" ? microphoneType() : desktopType());
-            auto *property =
-                props ? obs_properties_get(props, "device_id") : nullptr;
-            json devices = json::array();
-            if (property)
-              for (size_t i = 0; i < obs_property_list_item_count(property);
-                   i++)
-                devices.push_back(
-                    {{"name", obs_property_list_item_name(property, i)},
-                     {"id", obs_property_list_item_string(property, i)}});
-            obs_properties_destroy(props);
-            emit({{"event", "audio-devices"}, {"devices", devices}});
+              auto *props = obs_get_source_properties(
+                  kind == "input" ? microphoneType() : desktopType());
+              auto *property =
+                  props ? obs_properties_get(props, "device_id") : nullptr;
+              json devices = json::array();
+              if (property)
+                for (size_t i = 0; i < obs_property_list_item_count(property);
+                     i++)
+                  devices.push_back(
+                      {{"name", obs_property_list_item_name(property, i)},
+                       {"id", obs_property_list_item_string(property, i)}});
+              obs_properties_destroy(props);
+              emit({{"event", "audio-devices"}, {"devices", devices}});
 #ifdef __APPLE__
             }
 #endif

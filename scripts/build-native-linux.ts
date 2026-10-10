@@ -91,7 +91,7 @@ await writeFile(
          sourceCommit: "7546be7266dde276d82d4681fe1ab4fd8e32cf2b",
          source: "https://github.com/obsproject/obs-studio/tree/32.2.0",
          repository: "https://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu/",
-         platform: "Ubuntu 24.04 x64, X11 and Wayland screen portal",
+         platform: "Ubuntu 24.04 x64, X11, Wayland screen portal and exact XWayland application capture",
          waylandModule: waylandProvenance,
          modules,
          build: "scripts/build-native-linux.ts",
@@ -114,7 +114,7 @@ await writeFile(
             )
          ),
          limitations: [
-            "Wayland application and automatic game capture unavailable",
+            "Native Wayland application capture unavailable; XWayland applications use exact-window CPU compatibility capture",
             "Exact-window CPU compatibility capture can increase recording cost",
             "Corresponding Ubuntu dependency sources must be collected before public binary distribution",
          ],

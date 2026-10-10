@@ -61,6 +61,10 @@ patch = root / "native/wayland/obs-pipewire-health.patch"
 subprocess.run(["patch", "--batch", "--forward", "--fuzz=0", "-p1", "--input", str(patch)], cwd=source, check=True)
 subprocess.run(["cmake", "-S", str(root / "native/wayland"), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", "-DOBS_PIPEWIRE_SOURCE_DIR=" + str(source)], check=True)
 subprocess.run(["cmake", "--build", str(build), "-j2"], check=True)
+# Record the linker's actual opened inputs, rather than infer them from -l flags.
+link_command = [argument.replace("\\$", "$") for argument in shlex.split((build / "CMakeFiles/linux-pipewire.dir/link.txt").read_text())]
+linked = subprocess.run([*link_command, "-Wl,-t"], cwd=build, text=True, capture_output=True, check=True)
+(build / "linker-trace.txt").write_text(linked.stdout)
 module = build / "linux-pipewire.so"
 depfiles = list(build.glob("CMakeFiles/linux-pipewire.dir/**/*.o.d"))
 assert len(depfiles) == 7, "The module dependency evidence is incomplete"
@@ -75,13 +79,27 @@ commands = json.loads((build / "compile_commands.json").read_text())
 assert len(commands) == 7
 compiler = shlex.split(commands[0]["command"])[0]
 implicit_inputs = set()
-for name in ["crtbeginS.o", "crtendS.o", "crti.o", "crtn.o", "libgcc.a", "libgcc_s.so"]:
-    file = pathlib.Path(subprocess.check_output([compiler, "-print-file-name=" + name], text=True).strip()).resolve()
-    assert file.is_file(), "Compiler input is missing: " + name
-    implicit_inputs.add(file)
+linker_paths = {}
+for line in linked.stdout.splitlines():
+    file = pathlib.Path(line.strip())
+    if file.is_absolute():
+        reported = str(file)
+        file = file.resolve()
+        assert file.is_file(), "Linker input is missing: " + line
+        implicit_inputs.add(file)
+        linker_paths[reported] = str(file)
+assert any(file.name.startswith("libobs.so") for file in implicit_inputs), "The linker trace must bind libobs"
+compiler_inputs = {pathlib.Path(shutil.which(compiler)).resolve()}
+compiler_paths = {compiler: str(next(iter(compiler_inputs)))}
+for name in ["cc1", "as", "ld"]:
+    program = subprocess.check_output([compiler, "-print-prog-name=" + name], text=True).strip()
+    file = pathlib.Path(shutil.which(program) or program).resolve()
+    assert file.is_file(), "Compiler program is missing: " + name
+    compiler_inputs.add(file)
+    compiler_paths[program] = str(file)
 owners = {}
 package_records = {}
-query = subprocess.check_output(["dpkg-query", "-S", *map(str, sorted(headers | implicit_inputs))], text=True)
+query = subprocess.check_output(["dpkg-query", "-S", *map(str, sorted(headers | implicit_inputs | compiler_inputs))], text=True)
 for line in query.splitlines():
     if ": " in line:
         owner, file = line.split(": ", 1)
@@ -94,10 +112,10 @@ def installed_record(file):
         assert len(fields) == 4
         package_records[owner] = dict(zip(["binaryPackage", "binaryVersion", "sourcePackage", "sourceVersion"], fields))
     record = package_records[owner]
-    system = record["binaryPackage"].startswith(("libc6-dev", "linux-libc-dev", "libgcc-", "gcc-"))
+    system = record["binaryPackage"].startswith(("libc6", "linux-libc-dev", "libgcc-", "gcc-", "binutils"))
     return {"path": str(file), "sha256": digest(file), "size": file.stat().st_size, **record, "systemLibrary": system}
 
-evidence = [build / "compile_commands.json", build / "CMakeCache.txt", build / "CMakeFiles/linux-pipewire.dir/link.txt", *depfiles]
+evidence = [build / "compile_commands.json", build / "CMakeCache.txt", build / "CMakeFiles/linux-pipewire.dir/link.txt", build / "linker-trace.txt", *depfiles]
 provenance = {
     "obsVersion": "32.2.0",
     "sourceArchive": {"name": archive.name, "url": archive_url, "sha256": expected, "size": archive.stat().st_size},
@@ -106,9 +124,12 @@ provenance = {
     "sourceHashes": {name: digest(root / name) for name in ["native/wayland/CMakeLists.txt", "native/wayland/obs-pipewire-health.patch", "scripts/build-wayland-module.py"]},
     "module": {"name": module.name, "sha256": digest(module), "size": module.stat().st_size},
     "compilerVersion": subprocess.check_output([compiler, "--version"], text=True).strip(),
+    "compilerInputs": [installed_record(file) for file in sorted(compiler_inputs)],
+    "compilerPaths": compiler_paths,
     "buildEvidence": [{"path": str(file.relative_to(build)), "sha256": digest(file), "size": file.stat().st_size} for file in evidence],
     "headers": [installed_record(file) for file in sorted(headers)],
     "linkerInputs": [installed_record(file) for file in sorted(implicit_inputs)],
+    "linkerPaths": linker_paths,
 }
 (build / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 print("Built pinned portal health module", module)

@@ -27,7 +27,7 @@ import { isValidShortcut, recordingDestination, recordingSourceLabel, samePath }
 import { Recorder } from "./recorder";
 import { serveMedia } from "./serve";
 import { Updates } from "./updates";
-import { linuxStartup } from "./startup";
+import { linuxDesktopIdentity, linuxStartup } from "./startup";
 import { pendingExitDecision } from "./lifecycle";
 import { Feedback } from "./feedback";
 import { portalScreenId, portalSources } from "../shared/capture-policy";
@@ -163,7 +163,9 @@ async function showFeedback(message: string, error: boolean, saving: boolean) {
 import { screen } from "electron";
 async function sources(): Promise<CaptureSource[]> {
    if (process.platform === "linux") {
-      const choices = portalSources(await recorder.capabilities());
+      const capabilities = await recorder.capabilities();
+      const candidates = capabilities.applicationBackend === "xwayland" ? await recorder.applicationCandidates() : [];
+      const choices = portalSources(capabilities, candidates);
       if (choices !== null) return (cachedSources = choices);
       // Electron's independent portal session would ask twice and cannot name the native selection.
       if (process.env["WAYLAND_DISPLAY"]) return (cachedSources = []);
@@ -415,13 +417,15 @@ function registerIPC() {
    handle("state", () => state());
    handle("sources", () => sources());
    handle("games", () => recorder.games(preferences.customGames));
-   handle("preview-source", (id) => {
+   handle("preview-source", async (id) => {
       const requested = z.string().max(200).nullable().parse(id);
       if (requested === null) {
          previewSourceId = null;
          return;
       }
       if (requested === portalScreenId) throw new Error("System-selected capture does not provide a separate live preview.");
+      if (process.platform === "linux" && (await recorder.capabilities()).captureBackend === "wayland-portal")
+         throw new Error("Live preview is unavailable in this Wayland session. Recording uses the selected application directly.");
       if (!mainWindow?.isVisible() || mainWindow.isMinimized() || !preferences.setupComplete) throw new Error("Open Recording to preview the capture source.");
       const selected =
          preferences.sourceKind === "auto"
@@ -631,7 +635,11 @@ function registerIPC() {
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-   app.on("second-instance", () => {
+   app.on("second-instance", (_event, arguments_) => {
+      if (arguments_.includes("--clip")) {
+         void collectionReady.then(() => saveClip()).catch((error: unknown) => notice(errorMessage(error), true));
+         return;
+      }
       mainWindow?.show();
       mainWindow?.focus();
    });
@@ -654,7 +662,12 @@ else {
          preferencePath = join(app.getPath("userData"), "preferences.json");
          preferences = await readPreferences(preferencePath, process.env["ATTACLIP_COLLECTION"] ?? join(app.getPath("videos"), "AttaClip"));
          collectionReady = collections.open(preferences.collection);
-         const previewAllowed = () => !!previewSourceId && !!mainWindow?.isVisible() && !mainWindow.isMinimized() && !closingRequested;
+         const previewAllowed = () =>
+            !!previewSourceId &&
+            !!mainWindow?.isVisible() &&
+            !mainWindow.isMinimized() &&
+            !closingRequested &&
+            !(process.platform === "linux" && process.env["WAYLAND_DISPLAY"]);
          session.defaultSession.setDisplayMediaRequestHandler(
             (request, callback) => {
                if (request.frame !== mainWindow?.webContents.mainFrame || !request.videoRequested || request.audioRequested || !previewAllowed()) {
@@ -715,8 +728,20 @@ else {
          tray.on("double-click", () => mainWindow?.show());
          updateTray();
          await collectionReady;
+         if (process.platform === "linux" && app.isPackaged && process.env["ATTACLIP_TEST"] !== "1")
+            await linuxDesktopIdentity(
+               process.env["XDG_DATA_HOME"] ?? join(app.getPath("home"), ".local", "share"),
+               process.env["APPIMAGE"] ?? process.execPath,
+               iconPath()
+            ).catch((error: unknown) => notice(errorMessage(error), true));
          if (!globalShortcut.register(preferences.shortcut, () => void saveClip().catch((e) => notice(errorMessage(e), true))))
-            notice("Clip shortcut is unavailable. Choose another in Settings.", true);
+            notice(
+               process.platform === "linux" && process.env["WAYLAND_DISPLAY"]
+                  ? "Clip shortcut unavailable. Use Clip it, or bind AttaClip --clip in your desktop's shortcuts."
+                  : "Clip shortcut is unavailable. Choose another in Settings.",
+               true
+            );
+         if (process.argv.includes("--clip")) void saveClip().catch((error: unknown) => notice(errorMessage(error), true));
          setInterval(() => {
             emitState();
             if (!refreshBusy && !pendingJobs().length) {

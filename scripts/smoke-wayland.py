@@ -135,7 +135,8 @@ try:
     settings = dict(sourceKind="screen", sourceId="portal:screen", sourceName="Portal-selected screen", quality="custom", customWidth=640, customHeight=360, customFPS=24, customCQ=28, clipSeconds=2, captureAudio=True, microphone=False, allowSoftwareEncoder=True)
     for kind, identity in [("app", "window:1:0"), ("auto", "portal:screen"), ("screen", "screen:0:0")]:
         rejected = command(dict(settings, action="start", sourceKind=kind, sourceId=identity), "error")
-        assert "system screen picker" in rejected["message"].lower(), rejected
+        expected = "system screen picker" if kind == "screen" else "xwayland application capture is unavailable"
+        assert expected in rejected["message"].lower(), rejected
         command(dict(action="stop"))
     begin = time.monotonic()
     command(dict(settings, action="start"))

@@ -4,8 +4,7 @@ import path from "node:path";
 import { hashFile } from "./release-sources";
 import { linuxPath, linuxPython, validateLinuxSourceKit } from "./linux-source-kit";
 
-export async function packageLinuxSourceKit(project: string): Promise<string> {
-   const directory = path.join(project, "work/linux-release-sources");
+export async function packageLinuxSourceKit(project: string, directory = path.join(project, "work/linux-release-sources")): Promise<string> {
    const kit = await validateLinuxSourceKit(project, directory);
    const git = (...args: string[]): string => execFileSync("git", args, { cwd: project, windowsHide: true, encoding: "utf8" }).trim();
    if (git("rev-parse", "HEAD") !== kit.appCommit || git("status", "--porcelain"))
@@ -30,4 +29,4 @@ export async function packageLinuxSourceKit(project: string): Promise<string> {
    if (git("rev-parse", "HEAD") !== kit.appCommit || git("status", "--porcelain")) throw new Error("Release source changed while packaging its source asset");
    return archive;
 }
-if (import.meta.main) console.log(await packageLinuxSourceKit(process.cwd()));
+if (import.meta.main) console.log(await packageLinuxSourceKit(process.cwd(), path.resolve(process.argv[2] ?? "work/linux-release-sources")));

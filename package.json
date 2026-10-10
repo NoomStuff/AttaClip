@@ -1,11 +1,11 @@
 {
    "name": "attaclip",
-   "version": "0.1.0",
+   "version": "0.2.0",
    "description": "Save the moment. Keep it yours.",
    "license": "GPL-3.0-or-later",
    "type": "module",
    "main": "out/main/index.js",
-   "desktopName": "attaclip.desktop",
+   "desktopName": "dev.attaclip.app.desktop",
    "author": "NoomStuff",
    "scripts": {
       "dev": "electron-vite dev",

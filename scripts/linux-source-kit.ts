@@ -22,6 +22,7 @@ const nativeSchema = z.object({
    packages: z.array(packageSchema).min(1),
    blockers: z.array(z.string()),
    commonLicenses: z.array(z.object({ path: z.string(), sha256: z.string() })).min(1),
+   controlledModules: z.array(fileSchema.extend({ proof: z.string(), archive: z.string(), files: z.array(fileSchema).min(1) })).default([]),
 });
 const staticSchema = z.object({
    packages: z.array(packageSchema).min(1),
@@ -114,7 +115,8 @@ export function linuxPython(project: string, script: string, args: string[]): vo
 export async function collectLinuxSourceFiles(
    project: string,
    stage: string,
-   directory: string
+   directory: string,
+   noticeDirectory = path.join(project, "work/linux-release-notices")
 ): Promise<{ files: FileRecord[]; nativeCount: number; staticCount: number; appimage: LinuxSourceKit["appimage"] }> {
    linuxPython(project, "scripts/collect-linux-sources.py", [
       "--stage",
@@ -148,6 +150,7 @@ export async function collectLinuxSourceFiles(
       if (component.copyright) await record(component.copyright.path, component.copyright.sha256);
    }
    for (const file of native.commonLicenses) await record(file.path, file.sha256);
+   for (const module of native.controlledModules) for (const file of module.files) await record(file.path, file.sha256);
    // Preserve the exact public build/publication records, including historical package inputs.
    for (const file of await inventory(path.join(directory, "history"), "history")) await record(file.path, file.sha256);
    const review = JSON.parse(await readFile(path.join(directory, "static-input-verification.json"), "utf8")) as {
@@ -201,7 +204,7 @@ export async function collectLinuxSourceFiles(
       await record(relative, file.sha256);
    }
    // Runtime notices are a separate inventory. Keep complete texts in the source asset too.
-   const notices = path.join(project, "work/linux-release-notices");
+   const notices = noticeDirectory;
    for (const file of await inventory(notices)) {
       const relative = `runtime-notices/${file.path}`;
       const destination = packetPath(directory, relative);
@@ -235,8 +238,12 @@ export async function collectLinuxSourceFiles(
    };
 }
 
-export async function stageLinuxSourceNotices(project: string, stage: string): Promise<number> {
-   const root = path.join(project, "work/linux-release-notices");
+export async function stageLinuxSourceNotices(
+   project: string,
+   stage: string,
+   directory = path.join(project, "work/linux-release-sources"),
+   root = path.join(project, "work/linux-release-notices")
+): Promise<number> {
    const manifest = z.object({ licenses: z.array(fileSchema).min(1) }).parse(JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8")));
    const unique = [...new Map(manifest.licenses.map((file) => [file.path, file])).values()];
    await verifyPacketFiles(root, unique);
@@ -249,7 +256,7 @@ export async function stageLinuxSourceNotices(project: string, stage: string): P
       await mkdir(path.dirname(target), { recursive: true });
       await copyFile(packetPath(root, file.path), target);
    }
-   const toolsetRoot = path.join(project, "work/linux-release-sources/toolset");
+   const toolsetRoot = path.join(directory, "toolset");
    const toolset = toolsetSchema.parse(JSON.parse(await readFile(path.join(toolsetRoot, "manifest.json"), "utf8")));
    const packagerNotices = [...new Map(toolset.licenseFiles.map((file) => [file.path, file])).values()];
    await verifyPacketFiles(toolsetRoot, packagerNotices);
@@ -263,11 +270,16 @@ export async function stageLinuxSourceNotices(project: string, stage: string): P
    return unique.length + packagerNotices.length;
 }
 
-export async function assembleLinuxSourceKit(project: string, stage: string, directory: string): Promise<LinuxSourceKit> {
+export async function assembleLinuxSourceKit(
+   project: string,
+   stage: string,
+   directory: string,
+   noticeDirectory = path.join(project, "work/linux-release-notices")
+): Promise<LinuxSourceKit> {
    if (execFileSync("git", ["status", "--porcelain"], { cwd: project, encoding: "utf8", windowsHide: true }).trim())
       throw new Error("Commit the final source before assembling its Linux packet");
    const appCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8", windowsHide: true }).trim();
-   const { files, nativeCount, staticCount, appimage } = await collectLinuxSourceFiles(project, stage, directory);
+   const { files, nativeCount, staticCount, appimage } = await collectLinuxSourceFiles(project, stage, directory, noticeDirectory);
    const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: project, encoding: "utf8", windowsHide: true }).split("\0").filter(Boolean);
    for (const relative of tracked.filter(
       (file) => file.startsWith("src/") || ["package.json", "bun.lock", "electron.vite.config.ts", "tsconfig.json"].includes(file)
@@ -389,6 +401,12 @@ export async function validateLinuxSourceKit(project: string, directory: string)
       component.sourceArchives.forEach(requireFile);
    }
    native.commonLicenses.forEach(requireFile);
+   for (const module of native.controlledModules) {
+      module.files.forEach(requireFile);
+      const runtime = kit.staged.find((file) => file.path === `resources/recorder/${module.path}`);
+      if (!runtime || runtime.sha256 !== module.sha256 || runtime.size !== module.size)
+         throw new Error("Controlled module source evidence differs from staged module");
+   }
    const review = z
       .object({ staticInputs: z.array(fileSchema.omit({ size: true })).min(1) })
       .parse(JSON.parse(await readFile(path.join(directory, "static-input-verification.json"), "utf8")));
@@ -446,15 +464,17 @@ if (import.meta.main) {
    const stage = path.resolve(process.argv[2] ?? ".cache/linux-app");
    const directoryOption = process.argv.indexOf("--directory");
    const directory = path.resolve(directoryOption < 0 ? "work/linux-release-sources" : (process.argv[directoryOption + 1] ?? "work/linux-release-sources"));
+   const noticeOption = process.argv.indexOf("--notices-directory");
+   const noticeDirectory = path.resolve(noticeOption < 0 ? "work/linux-release-notices" : (process.argv[noticeOption + 1] ?? "work/linux-release-notices"));
    if (process.argv.includes("--stage-notices")) {
-      console.log(JSON.stringify({ noticeTexts: await stageLinuxSourceNotices(project, stage) }));
+      console.log(JSON.stringify({ noticeTexts: await stageLinuxSourceNotices(project, stage, directory, noticeDirectory) }));
       process.exit(0);
    }
    const result = process.argv.includes("--check")
       ? await validateLinuxSourceKit(project, directory)
       : process.argv.includes("--inputs-only")
-        ? await collectLinuxSourceFiles(project, stage, directory)
-        : await assembleLinuxSourceKit(project, stage, directory);
+        ? await collectLinuxSourceFiles(project, stage, directory, noticeDirectory)
+        : await assembleLinuxSourceKit(project, stage, directory, noticeDirectory);
    if (process.argv.includes("--inputs-only")) await writeFile(path.join(directory, "linux-inputs.json"), `${JSON.stringify(result, null, 2)}\n`);
    console.log(
       JSON.stringify(

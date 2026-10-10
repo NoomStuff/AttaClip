@@ -65,7 +65,7 @@ jobs:
          - name: Verify extra application and system audio
            run: python3 scripts/smoke-macos-audio.py
          - name: Verify native feedback focus, animation and capture behavior
-           run: python3 scripts/smoke-macos-feedback.py
+           run: python3 scripts/smoke-macos-feedback.py --ci-motion-matrix
          - name: Record native crash diagnostics
            if: failure()
            continue-on-error: true

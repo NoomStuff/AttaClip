@@ -6,6 +6,7 @@ panel, not the desktop. Capture inclusion is measured, never assumed.
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,47 @@ fixture_paths = []
 ffmpeg = str(root / "resources/media/ffmpeg")
 width, height = 640, 360
 media_threads = ["-threads", "1", "-filter_threads", "1"]
+motion_preferences = None
+
+
+class MotionPreferences:
+    """Change only a disposable hosted runner, and preserve key absence/type."""
+    domain = "com.apple.universalaccess"
+    key = "reduceMotion"
+
+    def __init__(self):
+        assert os.environ.get("GITHUB_ACTIONS") == "true", "Accessibility changes require GitHub Actions"
+        assert os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Never change a self-hosted user's accessibility preferences"
+        self.original = self.read()
+        assert not self.original["present"] or type(self.original["value"]) is bool, "Unexpected Reduce Motion preference type"
+        self.states = []
+        self.restored = False
+        self.record()
+
+    def read(self):
+        result = subprocess.run(["defaults", "export", self.domain, "-"], capture_output=True)
+        assert result.returncode == 0, result.stderr.decode()
+        domain = plistlib.loads(result.stdout)
+        return dict(present=self.key in domain, value=domain.get(self.key))
+
+    def record(self):
+        (folder / "motion-preferences.json").write_text(json.dumps(dict(
+            original=self.original, requestedStates=self.states, restored=self.restored), indent=2) + "\n")
+
+    def set(self, reduced):
+        subprocess.run(["defaults", "write", self.domain, self.key, "-bool", "true" if reduced else "false"], check=True)
+        assert self.read() == dict(present=True, value=reduced), "The runner's actual preference did not change"
+        self.states.append(reduced)
+        self.record()
+
+    def restore(self):
+        if self.original["present"]:
+            subprocess.run(["defaults", "write", self.domain, self.key, "-bool", "true" if self.original["value"] else "false"], check=True)
+        else:
+            subprocess.run(["defaults", "delete", self.domain, self.key], check=True)
+        assert self.read() == self.original, "The original accessibility preference was not restored exactly"
+        self.restored = True
+        self.record()
 
 
 def launch(args, name, pipe=False):
@@ -96,7 +138,23 @@ def start_capture(identity, kind):
     return wait("recorder", lambda event: event in events["recorder"][index:] and event["event"] == "recording")
 
 
-def notice(identity, label, saving=True):
+def motion_evidence(request, identity, reduced, leaving=False):
+    samples = [event for event in events["notifier"] if event.get("id") == request and event["event"] == "animation"
+               and (event["elapsed"] >= 2.4 if leaving else event["elapsed"] <= 0.25)]
+    assert len(samples) >= 3, samples
+    assert all(not event["active"] and not event["key"] and not event["main"] and
+               event["foregroundPID"] == identity["pid"] and event["reducedMotion"] == reduced for event in samples), samples
+    alpha_range = max(event["alpha"] for event in samples) - min(event["alpha"] for event in samples)
+    y_range = max(event["y"] for event in samples) - min(event["y"] for event in samples)
+    if reduced:
+        assert y_range == 0, samples
+        assert all(event["alpha"] == (0 if leaving else 1) for event in samples), samples
+    else:
+        assert alpha_range > 0.4 and y_range > 3, samples
+    return dict(samples=len(samples), alphaRange=alpha_range, verticalTravel=y_range, reducedMotion=reduced)
+
+
+def notice(identity, label, saving=True, expected_motion=None):
     request = str(uuid.uuid4())
     send(notifier, dict(message="Saving clip" if saving else "Clip saved", saving=saving,
                         id=request, trackAnimation=True, proofPath=str(folder / (label + "-panel.png"))))
@@ -104,10 +162,9 @@ def notice(identity, label, saving=True):
     assert not shown["active"] and not shown["key"] and not shown["main"], shown
     assert shown["foregroundPID"] == identity["pid"], shown
     assert shown["visible"] and shown["alpha"] >= 0.99, shown
-    samples = [event for event in events["notifier"] if event.get("id") == request and event["event"] == "animation"]
-    if not shown["reducedMotion"]:
-        assert len(samples) >= 3 and max(event["alpha"] for event in samples) - min(event["alpha"] for event in samples) > 0.4, samples
-        assert max(event["y"] for event in samples) - min(event["y"] for event in samples) > 3, samples
+    if expected_motion is not None:
+        assert shown["reducedMotion"] == expected_motion, "NSWorkspace did not observe the actual runner accessibility preference"
+    shown["entryMotion"] = motion_evidence(request, identity, shown["reducedMotion"])
     return request, shown
 
 
@@ -151,6 +208,10 @@ def capture_evidence(output, identity, shown):
 
 
 try:
+    if "--ci-motion-matrix" in sys.argv:
+        motion_preferences = MotionPreferences()
+        motion_preferences.set(False)
+    expected_motion = False if motion_preferences else None
     fixture_binary = folder / "fixture"
     subprocess.run(["swiftc", str(root / "native/macos/fixture.swift"), "-o", str(fixture_binary)], check=True)
     normal, normal_output, identity = fixture("Normal")
@@ -170,7 +231,7 @@ try:
             wait("notifier", lambda event: event.get("id") == "before-app" and event["event"] == "hidden", 6)
         time.sleep(2.5)
         baseline = save(kind + "-baseline", False)
-        request, shown = notice(identity, kind)
+        request, shown = notice(identity, kind, expected_motion=expected_motion)
         time.sleep(2.5)
         output = save(kind)
         evidence = capture_evidence(output, identity, shown)
@@ -186,9 +247,10 @@ try:
         else:
             assert evidence["darkPanelFrames"] == 0, "A separate popup appeared inside selected-window capture"
         captures.append(dict(kind=kind, notice=shown, baseline=before, **evidence))
-    request, shown = notice(identity, "saved", False)
+    request, shown = notice(identity, "saved", False, expected_motion)
     hidden = wait("notifier", lambda event: event.get("id") == request and event["event"] == "hidden", 6)
     assert not hidden["visible"] and not hidden["timerActive"], hidden
+    saved_exit = motion_evidence(request, identity, shown["reducedMotion"], leaving=True)
     Path(str(normal_output) + ".stop").touch()
     normal.wait(timeout=10)
 
@@ -205,7 +267,7 @@ try:
     start_capture(space_identity, "screen")
     time.sleep(2.5)
     baseline = save("fullscreen-space-baseline", False)
-    request, shown = notice(space_identity, "fullscreen")
+    request, shown = notice(space_identity, "fullscreen", expected_motion=expected_motion)
     time.sleep(2.5)
     output = save("fullscreen-space")
     space_evidence = capture_evidence(output, space_identity, shown)
@@ -222,25 +284,48 @@ try:
     send(notifier, dict(action="exit"))
     notifier.wait(timeout=10)
     assert notifier.returncode == 0, notifier.returncode
+    reduced_proof = None
+    if motion_preferences:
+        motion_preferences.set(True)
+        # A fresh native process reads the real OS preference. No helper-only
+        # override can turn this into simulated accessibility behavior.
+        notifier = launch([str(runtime / "attaclip-notifier")], "notifier", True)
+        ready = wait("notifier", lambda event: event["event"] == "ready" and event["pid"] == notifier.pid)
+        assert ready["bundleIdentifier"] == notifier_identity["bundleIdentifier"], ready
+        request, shown = notice(space_identity, "reduced-motion", False, True)
+        hidden = wait("notifier", lambda event: event.get("id") == request and event["event"] == "hidden", 6)
+        assert not hidden["visible"] and not hidden["timerActive"], hidden
+        reduced_proof = dict(notice=shown, exitMotion=motion_evidence(request, space_identity, True, leaving=True))
+        send(notifier, dict(action="exit"))
+        notifier.wait(timeout=10)
+        assert notifier.returncode == 0, notifier.returncode
     proof = dict(schema=1, platform=sys.platform, notifier=notifier_identity,
                  nonactivatingPanelTested=True,
                  actualMotionTested=any(not item["notice"]["reducedMotion"] for item in captures),
                  reducedMotionStates=[item["notice"]["reducedMotion"] for item in captures], idleTimerStoppedTested=True,
                  fullscreenSpaceTested=True, exclusiveFullscreenTested=False,
                  selectedWindowExcludesPanel=True, displayCaptureIncludesPanel=True, captures=captures)
-    (folder / "proof.json").write_text(json.dumps(proof, indent=2) + "\n")
-    print(json.dumps(proof, indent=2))
+    proof["savedExitMotion"] = saved_exit
+    proof["reducedMotionProof"] = reduced_proof
 finally:
-    for output in fixture_paths:
-        Path(str(output) + ".stop").touch()
-    for name, values in events.items():
-        (folder / (name + "-events.json")).write_text(json.dumps(values, indent=2) + "\n")
-    for child in reversed(children):
-        if child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-    for log in logs:
-        log.close()
+    try:
+        for output in fixture_paths:
+            Path(str(output) + ".stop").touch()
+        for name, values in events.items():
+            (folder / (name + "-events.json")).write_text(json.dumps(values, indent=2) + "\n")
+        for child in reversed(children):
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+        for log in logs:
+            log.close()
+    finally:
+        if motion_preferences:
+            motion_preferences.restore()
+
+proof["motionPreferenceRestored"] = motion_preferences.restored if motion_preferences else None
+(folder / "proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+print(json.dumps(proof, indent=2))

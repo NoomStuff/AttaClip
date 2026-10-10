@@ -65,8 +65,17 @@ int main(int argc, char **argv) {
   XFlush(display);
   std::thread first([&] { tone(base); });
   std::thread second([&] { tone(base + 502); });
-  while (!quitting)
-    usleep(10000);
+  auto gc = XCreateGC(display, window, 0, nullptr);
+  int frame = 0;
+  while (!quitting) {
+    XSetForeground(display, gc, 0x0000ff);
+    XFillRectangle(display, window, gc, 0, 0, 320, 180);
+    XSetForeground(display, gc, 0x00ff00);
+    XFillRectangle(display, window, gc, frame++ % 300, 5, 12, 12);
+    XFlush(display);
+    usleep(30000);
+  }
+  XFreeGC(display, gc);
   first.join();
   second.join();
   kill(child, SIGTERM);
