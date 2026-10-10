@@ -48,6 +48,26 @@ try {
       "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0",
    ]);
    run("cmake", ["--build", build, "--parallel", "2"]);
+   const inputHealthTest = path.join(build, "input-health-test");
+   run("clang++", ["-std=c++17", "native/macos/input-health.test.cpp", "-o", inputHealthTest]);
+   run(inputHealthTest, []);
+   const notifierArguments = [
+      "native/macos/notifier.swift",
+      "-O",
+      "-target",
+      `${process.arch === "arm64" ? "arm64" : "x86_64"}-apple-macos13.0`,
+      "-Xlinker",
+      "-sectcreate",
+      "-Xlinker",
+      "__TEXT",
+      "-Xlinker",
+      "__info_plist",
+      "-Xlinker",
+      "native/macos/notifier-Info.plist",
+      "-o",
+      path.relative(root, path.join(build, "attaclip-notifier")),
+   ];
+   run("swiftc", notifierArguments);
    await rm(runtime, { recursive: true, force: true });
    await mkdir(path.join(runtime, "Frameworks"), { recursive: true });
    await mkdir(path.join(runtime, "PlugIns"), { recursive: true });
@@ -86,6 +106,8 @@ try {
    }
    const executable = path.join(runtime, "attaclip-recorder");
    await copyFile(path.join(build, "attaclip-recorder"), executable);
+   const notifier = path.join(runtime, "attaclip-notifier");
+   await copyFile(path.join(build, "attaclip-notifier"), notifier);
    await dependencyClosure(path.join(build, "attaclip-recorder"));
    const allFiles = await files(contents);
    const mux = allFiles.find((file) => path.basename(file) === "obs-ffmpeg-mux");
@@ -107,20 +129,26 @@ try {
    if (!effect) throw new Error("The official libOBS effect resources are missing.");
    await cp(path.dirname(effect), path.join(runtime, "data/libobs"), { recursive: true });
    await chmod(executable, 0o755);
+   await chmod(notifier, 0o755);
    await chmod(path.join(runtime, "obs-ffmpeg-mux"), 0o755);
    if (!run("otool", ["-l", path.join(runtime, "obs-ffmpeg-mux")]).includes("path @executable_path/Frameworks (offset"))
       run("install_name_tool", ["-add_rpath", "@executable_path/Frameworks", path.join(runtime, "obs-ffmpeg-mux")]);
    run("codesign", ["--force", "--sign", "-", path.join(runtime, "obs-ffmpeg-mux")]);
    run("codesign", ["--force", "--sign", "-", executable]);
+   run("codesign", ["--force", "--sign", "-", notifier]);
    await copyFile(path.join(source, "COPYING"), path.join(runtime, "COPYING-OBS"));
    for (const file of await files(runtime)) providerFiles.push({ path: path.relative(runtime, file), sha256: await hashFile(file) });
    const sourceFiles = [
       "native/recorder.cpp",
+      "native/vendor/json.hpp",
       "native/CMakeLists.txt",
       "native/macos/platform.hpp",
+      "native/macos/input-health.hpp",
       "native/macos/platform.mm",
       "native/macos/main.mm",
       "native/macos/Info.plist",
+      "native/macos/notifier.swift",
+      "native/macos/notifier-Info.plist",
       "scripts/build-recorder-macos.ts",
    ];
    await writeFile(
@@ -133,6 +161,11 @@ try {
             platform: `macOS 13+, ${process.arch}`,
             runtimeArchive: { name: archiveName, sha256: await hashFile(path.join(cache, archiveName)) },
             build: "scripts/build-recorder-macos.ts",
+            feedbackBuild: {
+               compiler: run("swiftc", ["--version"]).trim(),
+               arguments: notifierArguments,
+               output: { path: "attaclip-notifier", sha256: await hashFile(notifier) },
+            },
             providerFiles,
             sourceHashes: Object.fromEntries(await Promise.all(sourceFiles.map(async (file) => [file, await hashFile(path.join(root, file))]))),
             limitations: [

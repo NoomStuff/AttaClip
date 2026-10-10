@@ -23,7 +23,21 @@ if provenance["runtimeArchive"]["sha256"] != PIN:
 mount = Path(tempfile.mkdtemp(prefix="attaclip-source-obs-"))
 subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount), str(archive)], check=True, capture_output=True)
 files = []
+links = []
 try:
+    # Framework loader links are part of the provider identity too. Reading
+    # matching target bytes alone could hide a different link arrangement.
+    for group in ["Frameworks", "PlugIns"]:
+        for item in (runtime / group).rglob("*"):
+            if item.is_symlink():
+                relative = item.relative_to(runtime)
+                official = mount / "OBS.app/Contents" / relative
+                target = item.readlink()
+                if not official.is_symlink() or target != official.readlink():
+                    raise RuntimeError(f"Provider framework link differs: {relative}")
+                if not item.resolve().is_relative_to(runtime.resolve()):
+                    raise RuntimeError(f"Provider link escapes runtime: {relative}")
+                links.append({"path": relative.as_posix(), "target": str(target)})
     for entry in provenance["providerFiles"]:
         relative = Path(entry["path"])
         if relative.is_absolute() or ".." in relative.parts:
@@ -59,6 +73,7 @@ output = project / ".cache/macos-source/runtime-proof.json"
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps({"version": 1, "officialArchive": {"name": archive.name, "sha256": PIN},
                               "sourceCommit": provenance["sourceCommit"], "providerFiles": files,
+                              "providerLinks": sorted(links, key=lambda entry: entry["path"]),
                               "ffmpegConfigurations": configurations,
                               "provenanceSha256": hashlib.sha256((runtime / "provenance.json").read_bytes()).hexdigest()}, indent=2) + "\n")
 print(f"Compared {len(files)} Mach-O files with official OBS and probed all FFmpeg configurations")

@@ -3,6 +3,7 @@ import { readFile, mkdir, copyFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { hashFile, type SourceKit } from "./release-sources";
 import { macRecipe } from "./macos-obs-sources";
+import { macTree, type MacTreeEntry } from "./macos-file-tree";
 
 interface LibraryProbe {
    file: string;
@@ -15,6 +16,7 @@ interface RuntimeProbe {
    sourceCommit: string;
    provenanceSha256: string;
    providerFiles: { path: string; sha256: string; size: number; imports: string }[];
+   providerLinks?: { path: string; target: string }[];
    ffmpegConfigurations: LibraryProbe[];
 }
 
@@ -46,7 +48,12 @@ export function checkMacFfmpegSources(libraries: LibraryProbe[], headers: Record
    }
 }
 
-export async function verifyMacObsSourceInputs(project: string, directory: string, proofFile: string): Promise<void> {
+export async function verifyMacObsSourceInputs(
+   project: string,
+   directory: string,
+   proofFile: string,
+   options: { stageNotices?: boolean; writeReport?: boolean } = {}
+): Promise<void> {
    const kit = JSON.parse(await readFile(path.join(directory, "obs-inputs.json"), "utf8")) as SourceKit;
    if (kit.platform !== "darwin-arm64" || kit.sources.length !== 3 || kit.dependencySources?.length !== 17 || kit.dependencyFailures?.length)
       throw new Error("Mac OBS source input collection is incomplete.");
@@ -57,6 +64,36 @@ export async function verifyMacObsSourceInputs(project: string, directory: strin
       proof.officialArchive.sha256 !== "920d6f26703d2df6e4085bd3c1cbed30488325084136c7a6e9e37021fbd6aaf7"
    )
       throw new Error("Runtime proof refers to another official OBS release.");
+   const coveredProviders = [
+      "PlugIns/mac-videotoolbox.plugin/Contents/MacOS/mac-videotoolbox",
+      "PlugIns/obs-x264.plugin/Contents/MacOS/obs-x264",
+      "PlugIns/mac-capture.plugin/Contents/MacOS/mac-capture",
+      "PlugIns/obs-ffmpeg.plugin/Contents/MacOS/obs-ffmpeg",
+      "Frameworks/libobs.framework/Versions/A/libobs",
+      "Frameworks/libswscale.dylib",
+      "Frameworks/libobs-metal.dylib",
+      "Frameworks/libmbedcrypto.dylib",
+      "Frameworks/libmbedx509.dylib",
+      "Frameworks/libobs-opengl.dylib",
+      "Frameworks/libx264.dylib",
+      "Frameworks/libmbedtls.dylib",
+      "Frameworks/libavformat.dylib",
+      "Frameworks/libavutil.dylib",
+      "Frameworks/libsrt.dylib",
+      "Frameworks/librist.dylib",
+      "Frameworks/libavcodec.dylib",
+      "Frameworks/libswresample.dylib",
+      "Frameworks/libavdevice.dylib",
+      "Frameworks/libavfilter.dylib",
+   ];
+   if (
+      proof.providerFiles
+         .map((file) => file.path)
+         .sort()
+         .join("\n") !== coveredProviders.sort().join("\n") ||
+      !proof.providerLinks
+   )
+      throw new Error("Provider proof is missing, duplicated, or has a Mach-O without captured matching sources.");
    const sources = [...kit.sources, ...kit.dependencySources];
    const recipes = kit.sources.find((source) => source.repository === "obsproject/obs-deps" && source.commit === "8683107a02300923abe4f293920f4b5edc8cb624");
    if (!recipes) throw new Error("The exact Mac recipe archive is missing.");
@@ -90,7 +127,7 @@ export async function verifyMacObsSourceInputs(project: string, directory: strin
    }
    checkMacFfmpegSources(proof.ffmpegConfigurations, headers);
    // Only stage notices on the actual Mac host whose files were compared.
-   if (process.platform === "darwin") {
+   if (process.platform === "darwin" && options.stageNotices !== false) {
       const runtime = path.join(project, "resources/recorder");
       if ((await hashFile(path.join(runtime, "provenance.json"))) !== proof.provenanceSha256) throw new Error("Recorder changed after source comparison.");
       for (const file of proof.providerFiles) {
@@ -98,6 +135,15 @@ export async function verifyMacObsSourceInputs(project: string, directory: strin
          if (!absolute.startsWith(`${runtime}${path.sep}`) || (await hashFile(absolute)) !== file.sha256)
             throw new Error(`Mac provider file changed: ${file.path}`);
       }
+      const links = (await macTree(runtime))
+         .filter((file): file is Extract<MacTreeEntry, { kind: "link" }> => file.kind === "link" && /^(?:Frameworks|PlugIns)\//.test(file.path))
+         .map((file) => ({ path: file.path, target: file.target }));
+      if (
+         !proof.providerLinks ||
+         JSON.stringify(links.sort((a, b) => a.path.localeCompare(b.path))) !==
+            JSON.stringify([...proof.providerLinks].sort((a, b) => a.path.localeCompare(b.path)))
+      )
+         throw new Error("Provider framework link comparison is missing or changed.");
       for (const license of sources.flatMap((source) => source.licenses)) {
          const target = path.resolve(project, "resources/notices/native-macos", license.path);
          if (!target.startsWith(`${path.resolve(project, "resources/notices/native-macos")}${path.sep}`))
@@ -106,10 +152,11 @@ export async function verifyMacObsSourceInputs(project: string, directory: strin
          await copyFile(path.join(directory, license.path), target);
       }
    }
-   await writeFile(
-      path.join(directory, "obs-source-validation.json"),
-      `${JSON.stringify({ version: 1, appCommit: kit.appCommit, runtimeProofSha256: await hashFile(proofFile), sourceRecords: records, ffmpegLibraries: proof.ffmpegConfigurations, providerFiles: proof.providerFiles, fullNoticeCount: sources.flatMap((source) => source.licenses).length, publicInstallerReady: false, remaining: "Frozen application archive and final packaged-container/updater proof are required." }, null, 2)}\n`
-   );
+   if (options.writeReport !== false)
+      await writeFile(
+         path.join(directory, "obs-source-validation.json"),
+         `${JSON.stringify({ version: 1, appCommit: kit.appCommit, runtimeProofSha256: await hashFile(proofFile), sourceRecords: records, ffmpegLibraries: proof.ffmpegConfigurations, providerFiles: proof.providerFiles, fullNoticeCount: sources.flatMap((source) => source.licenses).length, publicInstallerReady: false, remaining: "Frozen application archive and final packaged-container/updater proof are required." }, null, 2)}\n`
+      );
    console.log("Mac OBS source versions/configuration verified. Final packaged release proof remains required.");
 }
 

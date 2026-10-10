@@ -5,6 +5,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <VideoToolbox/VideoToolbox.h>
 #include "platform.hpp"
+#include "input-health.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -38,6 +39,7 @@ struct AudioTarget {
 };
 std::unordered_map<obs_source_t *, CaptureHealth *> audioHealth;
 std::unordered_map<obs_source_t *, AudioTarget> audioTargets;
+InputHealth inputHealth;
 
 std::string text(CFStringRef value) {
   if (!value) return {};
@@ -341,7 +343,26 @@ obs_source_t *createSystemAudio(const std::string &name) {
 std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid) {
   if (!source) return {};
   const char *type = obs_source_get_id(source);
-  if (!type || std::string(type) != "sck_audio_capture") return {};
+  if (!type) return {};
+  if (std::string(type) == "coreaudio_input_capture") {
+    auto *settings = obs_source_get_settings(source);
+    const std::string device = obs_data_get_string(settings, "device_id");
+    obs_data_release(settings);
+    std::lock_guard<std::mutex> lock(availabilityMutex);
+    return inputHealth.error(device, std::chrono::steady_clock::now(), [] {
+      return [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusAuthorized;
+    }, [] {
+      std::vector<std::string> devices;
+      auto *properties = obs_get_source_properties("coreaudio_input_capture");
+      auto *list = properties ? obs_properties_get(properties, "device_id") : nullptr;
+      for (size_t i = 0; list && i < obs_property_list_item_count(list); ++i)
+        if (!obs_property_list_item_disabled(list, i))
+          devices.emplace_back(obs_property_list_item_string(list, i));
+      if (properties) obs_properties_destroy(properties);
+      return devices;
+    });
+  }
+  if (std::string(type) != "sck_audio_capture") return {};
   std::lock_guard<std::mutex> lock(availabilityMutex);
   auto health = audioHealth.find(source);
   if (health != audioHealth.end() && health->second->failed.load()) return "Audio capture stopped. Stop recording and select the source again";

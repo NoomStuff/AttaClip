@@ -30,8 +30,25 @@ That run's provider comparison passed. `macos-source-validation.ts` then passed 
 
 `collect-macos-electron.ts` gathers Electron44.7.0's exact Darwin arm64 Chromium FFmpeg sources, configuration, patches, Opus sources, build helpers and licenses. It compares the installed module with its member in the checksum-verified official Electron archive. Electron's MIT notice does not replace that module's LGPL source obligations.
 
-The first run failed because the assumed installed distribution under `node_modules/electron/dist` was absent. The official Darwin arm64 ZIP does contain the expected separate `libffmpeg.dylib` member. Its verified SHA-256 is `e04e411b58a0a14375dd21b0ab4a378fd38930a702e4e20e322fee4849404c0b`. The collector now accepts an explicit actual module path, and the Mac wrapper targets the application tested under `release/mac-arm64/AttaClip.app`. The exact member-byte comparison remains mandatory. This fix still needs an actual Mac rerun, including checking whether packaging changed the module signature.
+The first run failed because the assumed installed distribution under `node_modules/electron/dist` was absent. The official Darwin arm64 ZIP does contain the expected separate `libffmpeg.dylib` member. Its verified SHA-256 is `e04e411b58a0a14375dd21b0ab4a378fd38930a702e4e20e322fee4849404c0b`. The collector now accepts an explicit actual module path, and the Mac wrapper targets the application tested under `release/mac-arm64/AttaClip.app`. Run37950362493 at37f044a passed that actual packaged member comparison, along with controlled media, native core and extra audio, and packaged capture and sharing. The module matched the official member exactly, including its signature bytes.
 
 The current Mac workflow uploads source inputs, configurations, licenses and comparison reports. It excludes executables, provider binary archives and packaged apps. Those artifacts are evidence for completing the packet, not a public binary release.
 
-The remaining gate must validate the actual Mac configurations against the captured dependency recipes, retain all full runtime notices, bind the application source to a frozen Git commit, create the complete source ZIP and compare the packaged application and updater metadata with that packet. Source collection or a successful capture test alone cannot pass that gate.
+## Frozen packet and complete package gate
+
+The workflow now prepares OBS and Electron full license texts before packaging. Electron preparation records `official-reference-only`, then the final packaged comparison replaces that record with `packaged-module-byte-equality`. The source gate refuses the preparation-only record. The native helper's vendored JSON3.12.0 has its own complete MIT notice, separately from OBS's JSON3.11.3 input.
+
+The provider probe also compares actual framework link targets with the official image. The source assembler requires all20 covered provider Mach-O records, source fingerprints for the helper, notifier and vendor header, the matching controlled CLI recipe and codec proof, and a clean application commit. It captures only the referenced sources, patches, build configurations, full licenses and immutable application archive.
+
+Run these on the actual frozen Apple Silicon build:
+
+```sh
+bun scripts/macos-source-kit.ts
+bun scripts/macos-source-kit.ts work/macos-release-sources --check
+bun scripts/package-macos-source-kit.ts
+bun scripts/verify-macos-release.ts work/macos-release-sources "$SOURCE_ZIP" "$APPLICATION_ZIP"
+```
+
+The final verifier checks the source ZIP's exact member set and hashes. It regenerates the application archive from Git, installs the frozen lockfile, rebuilds the app in an isolated directory and independently packages it again. It compares every application file, executable mode and relative framework link. It rejects extra libraries, altered notices and mismatched Electron FFmpeg bytes. The updater check hashes the actual ZIP and independently regenerates its differential blockmap. It makes no blanket exception for code signatures or Mach-O load commands.
+
+These new complete-package stages still need an actual Mac run. No public Mac binary is approved until they pass. CI uploads the source packet and proof reports, with no application ZIP or provider binary archive. Signing or notarization later changes package bytes and requires a new corresponding package check.

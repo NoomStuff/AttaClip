@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, readdir, stat, copyFile } from "node:fs/promises";
 import path from "node:path";
@@ -18,7 +19,14 @@ const pins = {
 export async function collectElectronFfmpeg(
    project: string,
    directory: string,
-   options: { platform?: "win32" | "linux" | "darwin"; arch?: "x64" | "arm64"; binaryArchive?: string; sourceCache?: string; actualModule?: string } = {}
+   options: {
+      platform?: "win32" | "linux" | "darwin";
+      arch?: "x64" | "arm64";
+      binaryArchive?: string;
+      sourceCache?: string;
+      actualModule?: string;
+      referenceOnly?: boolean;
+   } = {}
 ): Promise<{
    id: string;
    version: string;
@@ -139,7 +147,7 @@ export async function collectElectronFfmpeg(
       }
    );
    const actualModule = options.actualModule ?? path.join(project, "node_modules/electron/dist", moduleName);
-   const actualDll = await readFile(actualModule);
+   const actualDll = options.referenceOnly ? officialDll : await readFile(actualModule);
    if (!actualDll.equals(officialDll)) throw new Error("Electron FFmpeg module differs from the official release archive.");
    const buildInstructions: FileRecord[] = [];
    for (const [name, url] of [
@@ -163,12 +171,12 @@ export async function collectElectronFfmpeg(
    const metadataFile = path.join(folder, "correspondence.json");
    await writeFile(
       metadataFile,
-      `${JSON.stringify({ ...pins, ...(platform !== "win32" ? { platform, arch, moduleName } : {}), officialArchive: { name: zipName, sha256: expected }, ffmpegDll: { sha256: await hashFile(actualModule), size: actualDll.length }, sourceArchives, licenseFiles, buildInstructions }, null, 2)}\n`
+      `${JSON.stringify({ ...pins, ...(platform !== "win32" ? { platform, arch, moduleName } : {}), ...(options.referenceOnly ? { comparison: "official-reference-only" } : platform === "darwin" ? { comparison: "packaged-module-byte-equality" } : {}), officialArchive: { name: zipName, sha256: expected }, ffmpegDll: { sha256: createHash("sha256").update(actualDll).digest("hex"), size: actualDll.length }, sourceArchives, licenseFiles, buildInstructions }, null, 2)}\n`
    );
    const instructionsFile = path.join(folder, "BUILD.txt");
    await writeFile(
       instructionsFile,
-      `Electron ${version} FFmpeg module\n\nThe captured Electron DEPS pins Chromium ${pins.chromiumVersion}, commit ${pins.chromium}. Chromium DEPS pins FFmpeg ${pins.ffmpeg}. The bundled ${moduleName} was compared byte-for-byte with the checksum-verified official Electron zip.\n\nExtract chromium-ffmpeg.tar.gz as src/third_party/ffmpeg in a Chromium checkout at the captured commit. Extract the Electron source as src/electron and Chromium build scripts as src/build. Restore chromium-opus.tar.gz under src/third_party/opus, chromium-nasm.tar.gz under src/third_party/nasm, chromium-generate-stubs.tar.gz under src/tools/generate_stubs, and chromium-testing-build.tar.gz under src/testing. The captured Opus tree records upstream revision ${pins.opus}, with Chromium local changes. Restore chromium-root.gn as src/.gn and chromium-root-BUILD.gn as src/BUILD.gn. Follow Electron's captured docs/development/build-instructions-gn.md and platform instructions. Synchronize the pinned DEPS inputs with depot_tools, apply the captured Electron FFmpeg patch list, generate out/Release using electron/build/args/release.gn, and build the ffmpeg GN target. The release configuration uses Chrome branding, proprietary_codecs=true, and is_component_ffmpeg=true. The captured ${platform === "win32" ? "Windows" : platform === "linux" ? "Linux" : "macOS"} ${arch} config has CONFIG_GPL=0 and CONFIG_NONFREE=0. The Electron FFmpeg patch only changes macOS install_name; its complete text is included. Generic compiler/toolchain downloads are not library source.\n\nElectron's MIT license does not replace this module's LGPL license. The module's complete source, generated configuration, license files, build scripts, patches, and immutable dependency records are included here.\n`
+      `Electron ${version} FFmpeg module\n\nThe captured Electron DEPS pins Chromium ${pins.chromiumVersion}, commit ${pins.chromium}. Chromium DEPS pins FFmpeg ${pins.ffmpeg}. ${options.referenceOnly ? "Source and notice preparation uses the checksum-verified official archive. The final packaged module still requires byte comparison." : `The bundled ${moduleName} was compared byte-for-byte with the checksum-verified official Electron zip.`}\n\nExtract chromium-ffmpeg.tar.gz as src/third_party/ffmpeg in a Chromium checkout at the captured commit. Extract the Electron source as src/electron and Chromium build scripts as src/build. Restore chromium-opus.tar.gz under src/third_party/opus, chromium-nasm.tar.gz under src/third_party/nasm, chromium-generate-stubs.tar.gz under src/tools/generate_stubs, and chromium-testing-build.tar.gz under src/testing. The captured Opus tree records upstream revision ${pins.opus}, with Chromium local changes. Restore chromium-root.gn as src/.gn and chromium-root-BUILD.gn as src/BUILD.gn. Follow Electron's captured docs/development/build-instructions-gn.md and platform instructions. Synchronize the pinned DEPS inputs with depot_tools, apply the captured Electron FFmpeg patch list, generate out/Release using electron/build/args/release.gn, and build the ffmpeg GN target. The release configuration uses Chrome branding, proprietary_codecs=true, and is_component_ffmpeg=true. The captured ${platform === "win32" ? "Windows" : platform === "linux" ? "Linux" : "macOS"} ${arch} config has CONFIG_GPL=0 and CONFIG_NONFREE=0. The Electron FFmpeg patch only changes macOS install_name; its complete text is included. Generic compiler/toolchain downloads are not library source.\n\nElectron's MIT license does not replace this module's LGPL license. The module's complete source, generated configuration, license files, build scripts, patches, and immutable dependency records are included here.\n`
    );
    buildInstructions.push(
       await record(electronDeps),

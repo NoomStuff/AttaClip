@@ -31,6 +31,8 @@ import { linuxStartup } from "./startup";
 import { pendingExitDecision } from "./lifecycle";
 import { Feedback } from "./feedback";
 import { portalScreenId, portalSources } from "../shared/capture-policy";
+import { findAttaCut, rememberAttaCut } from "./attacut";
+import { needsMicrophonePermission } from "../shared/audio-policy";
 
 protocol.registerSchemesAsPrivileged([{ scheme: "attaclip-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -260,9 +262,9 @@ async function startRecording() {
    if (startingCapture || ["starting", "recording", "waiting"].includes(recorder.status.state)) throw new Error("Recording is already running.");
    startingCapture = (async () => {
       await preferenceWrites.catch(() => undefined);
-      if (process.platform === "darwin" && preferences.microphone && systemPreferences.getMediaAccessStatus("microphone") !== "granted") {
+      if (process.platform === "darwin" && needsMicrophonePermission(preferences) && systemPreferences.getMediaAccessStatus("microphone") !== "granted") {
          if (!(await systemPreferences.askForMediaAccess("microphone")))
-            throw new Error("Allow microphone access in System Settings, or turn the microphone off.");
+            throw new Error("Allow microphone access in System Settings, or turn off microphone sources.");
       }
       const available = await sources();
       if (closingRequested) throw new Error("AttaClip is preparing to exit. Keep the app open to record.");
@@ -555,26 +557,44 @@ function registerIPC() {
    handle("attacut", async (id) => {
       const clip = collections.clips.find((c) => c.id === idSchema.parse(id));
       if (!clip) throw new Error("Clip not found");
-      const candidates =
-         process.platform === "win32"
-            ? [join(app.getPath("appData"), "../Local/Programs/AttaCut/AttaCut.exe"), "D:/Coding/AttaCut/release/win-unpacked/AttaCut.exe"]
-            : process.platform === "darwin"
-              ? ["/Applications/AttaCut.app/Contents/MacOS/AttaCut"]
-              : [];
-      const executable = candidates.find(existsSync);
+      const settings = join(app.getPath("userData"), "attacut.json");
+      let executable = await findAttaCut(settings, {
+         platform: process.platform,
+         home: app.getPath("home"),
+         appData: app.getPath("appData"),
+         searchPath: process.env["PATH"] ?? "",
+      });
+      if (!executable) {
+         const action = await dialog.showMessageBox({
+            type: "info",
+            message: "Where is AttaCut?",
+            detail: "Locate the application once to open your clips there.",
+            buttons: ["Locate AttaCut", "Show clip", "Cancel"],
+            defaultId: 0,
+            cancelId: 2,
+         });
+         if (action.response === 1) {
+            shell.showItemInFolder(clip.path);
+            return;
+         }
+         if (action.response !== 0) return;
+         const picked = await dialog.showOpenDialog({
+            title: "Locate AttaCut",
+            properties: ["openFile"],
+            ...(process.platform === "win32"
+               ? { filters: [{ name: "Application", extensions: ["exe"] }] }
+               : process.platform === "darwin"
+                 ? { filters: [{ name: "Application", extensions: ["app"] }] }
+                 : {}),
+         });
+         if (picked.canceled || !picked.filePaths[0]) return;
+         executable = await rememberAttaCut(settings, picked.filePaths[0], process.platform);
+      }
       if (executable) {
          const { spawn } = await import("node:child_process");
          const child = spawn(executable, [clip.path], { detached: true, stdio: "ignore", windowsHide: true });
          child.once("error", () => notice("AttaCut could not open. Show the clip in your file manager and open it there.", true));
          child.unref();
-      } else {
-         await dialog.showMessageBox({
-            type: "info",
-            message: "Open this clip in AttaCut",
-            detail: "AttaCut wasn't found automatically. The clip will be shown in your file manager.",
-            buttons: ["Show clip"],
-         });
-         shell.showItemInFolder(clip.path);
       }
    });
    handle("playback", (path, track) => collections.playback(trustedPath(path), track === undefined ? undefined : z.number().int().min(0).max(63).parse(track)));

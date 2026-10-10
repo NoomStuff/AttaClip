@@ -26,6 +26,7 @@
 #include "linux-app-audio.hpp"
 #include "linux-process.hpp"
 #include "x11-compat.hpp"
+#include "wayland/platform.hpp"
 #include <X11/Xlib.h>
 #include <obs-nix-platform.h>
 #include <pthread.h>
@@ -477,6 +478,9 @@ public:
   int64_t previousEnd = 0;
   bool avoidOverlap = false;
   std::string encoder, sourceName, selectedSourceId;
+#ifdef __linux__
+  std::shared_ptr<attaclip::wayland::Capture> portalCapture;
+#endif
   Recorder() {
     captureMeter = obs_volmeter_create(OBS_FADER_LOG);
     microphoneMeter = obs_volmeter_create(OBS_FADER_LOG);
@@ -566,6 +570,9 @@ public:
       obs_source_release(capture);
       capture = nullptr;
     }
+#ifdef __linux__
+    std::atomic_store(&portalCapture, std::shared_ptr<attaclip::wayland::Capture>{});
+#endif
     if (desktop) {
       obs_source_release(desktop);
       desktop = nullptr;
@@ -670,6 +677,10 @@ public:
     return attaclip::macos::targetAvailable(targetWindow.load());
 #endif
 #ifdef __linux__
+    if (attaclip::wayland::enabled()) {
+      auto portal = std::atomic_load(&portalCapture);
+      return portal && portal->health().working();
+    }
     if (!screenCapture && !windowCompatibility && captureTextureFailure)
       return false;
     if (!captureAudioError().empty())
@@ -744,6 +755,13 @@ public:
   }
   std::string additionalAudioError() {
     std::lock_guard<std::mutex> audioLock(audioSourcesMutex);
+#ifdef __APPLE__
+    if (mic) {
+      auto error = attaclip::macos::audioError(mic, 0, 0);
+      if (!error.empty())
+        return "Microphone: " + error;
+    }
+#endif
     for (auto &extra : additionalAudio) {
 #ifdef _WIN32
       if (extra.window) {
@@ -1304,6 +1322,11 @@ public:
   }
   void source(const json &c) {
     std::string kind = c.value("sourceKind", "screen");
+#ifdef __linux__
+    if (attaclip::wayland::enabled() &&
+        (kind != "screen" || c.value("sourceId", "") != "portal:screen"))
+      throw std::runtime_error("Wayland recording requires the system screen picker. Application and automatic capture are unavailable");
+#endif
     if (kind == "auto")
       kind = c.value("resolvedKind", "waiting");
     if (kind == "waiting") {
@@ -1347,6 +1370,9 @@ public:
     obs_source_t *next = nullptr;
     bool compatibility = false;
     std::string nextDisplayIdentity;
+#ifdef __linux__
+    std::shared_ptr<attaclip::wayland::Capture> nextPortal;
+#endif
 #ifdef _WIN32
     if (kind == "screen") {
       auto *props = obs_get_source_properties("monitor_capture");
@@ -1483,13 +1509,10 @@ public:
 #elif defined(__APPLE__)
     next = attaclip::macos::createCapture(c);
 #elif defined(__linux__)
-    if (!std::getenv("DISPLAY") ||
-        (std::getenv("WAYLAND_DISPLAY") && *std::getenv("WAYLAND_DISPLAY")) ||
-        (std::getenv("XDG_SESSION_TYPE") &&
-         std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland"))
-      throw std::runtime_error("Native Linux capture currently requires an X11 "
-                               "session. Wayland capture is unavailable");
-    if (kind == "app") {
+    if (attaclip::wayland::enabled()) {
+      nextPortal = attaclip::wayland::createScreen();
+      next = obs_source_get_ref(nextPortal->source());
+    } else if (kind == "app") {
       std::string id = c.value("sourceId", "");
       if (id.rfind("window:", 0) != 0)
         throw std::runtime_error(
@@ -1663,6 +1686,9 @@ public:
     if (capture)
       obs_source_release(capture);
     capture = next;
+#ifdef __linux__
+    std::atomic_store(&portalCapture, std::move(nextPortal));
+#endif
     item = obs_scene_add(scene, capture);
     obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
     vec2 bounds{float(width), float(height)};
@@ -1675,6 +1701,10 @@ public:
       std::lock_guard<std::mutex> lock(mutex);
       sourceName = c.value("sourceName", "Screen");
       selectedSourceId = c.value("sourceId", "");
+#ifdef __linux__
+      if (attaclip::wayland::enabled())
+        sourceName = "Portal-selected screen";
+#endif
     }
     captureEnabled = true;
     if (desktop)
@@ -1889,7 +1919,15 @@ int main(int argc, char **argv) {
     sigaddset(&brokenPipe, SIGPIPE);
     if (pthread_sigmask(SIG_BLOCK, &brokenPipe, nullptr) != 0)
       throw std::runtime_error("Could not configure recorder pipe handling");
-    if (!XInitThreads())
+    auto waylandPlatform = std::make_unique<attaclip::wayland::Platform>();
+    struct ObsShutdown {
+      bool initialized = false;
+      ~ObsShutdown() {
+        if (initialized)
+          obs_shutdown();
+      }
+    } obsShutdown;
+    if (!attaclip::wayland::enabled() && !XInitThreads())
       throw std::runtime_error("X11 thread initialization failed");
 #endif
     base_set_log_handler(logger, nullptr);
@@ -1918,17 +1956,19 @@ int main(int argc, char **argv) {
     )
       throw std::runtime_error("libOBS initialization failed");
 #ifdef __linux__
-    if (!std::getenv("DISPLAY"))
-      throw std::runtime_error(
-          "An X11 display is required for native recording");
-    auto *display = XOpenDisplay(nullptr);
-    if (!display)
-      throw std::runtime_error("The X11 display could not be opened");
-    obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
-    obs_set_nix_platform_display(display);
-    candidateConnection = xcb_connect(nullptr, nullptr);
-    if (xcb_connection_has_error(candidateConnection))
-      throw std::runtime_error("X11 application identity connection failed");
+    obsShutdown.initialized = true;
+    if (!attaclip::wayland::enabled()) {
+      if (!std::getenv("DISPLAY"))
+        throw std::runtime_error("An X11 display is required for native recording");
+      auto *display = XOpenDisplay(nullptr);
+      if (!display)
+        throw std::runtime_error("The X11 display could not be opened");
+      obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
+      obs_set_nix_platform_display(display);
+      candidateConnection = xcb_connect(nullptr, nullptr);
+      if (xcb_connection_has_error(candidateConnection))
+        throw std::runtime_error("X11 application identity connection failed");
+    }
     muxExecutable = (root / "obs-ffmpeg-mux").string();
 #endif
     obs_add_data_path(((root / "data/libobs").u8string() + "/").c_str());
@@ -1976,6 +2016,12 @@ int main(int argc, char **argv) {
                           data.string().c_str()) == MODULE_SUCCESS)
         obs_init_module(module);
     }
+    if (attaclip::wayland::enabled()) {
+      attaclip::wayland::loadModule((root / "obs-plugins/linux-pipewire.so").string(),
+                                  (root / "data/obs-plugins/linux-pipewire").string());
+      if (!attaclip::wayland::screenAvailable())
+        throw std::runtime_error("The system portal cannot share a screen");
+    }
 #endif
     obs_post_load_modules();
 #ifdef __linux__
@@ -2014,9 +2060,17 @@ int main(int argc, char **argv) {
     {
       Recorder r;
       recorder = &r;
-      emit({{"event", "ready"},
+      json ready = {{"event", "ready"},
             {"version", obs_get_version_string()},
-            {"encoders", hardwareEncoders()}});
+            {"encoders", hardwareEncoders()}};
+#ifdef __linux__
+      if (attaclip::wayland::enabled()) {
+        ready["captureBackend"] = "wayland-portal";
+        ready["sourceKinds"] = json::array({"screen"});
+        ready["portalPicker"] = true;
+      }
+#endif
+      emit(ready);
       std::string line;
       while (std::getline(std::cin, line)) {
         json c;
@@ -2034,6 +2088,15 @@ int main(int argc, char **argv) {
             r.source(c);
           else if (action == "audio")
             r.setAudio(c);
+#ifdef __linux__
+          else if (action == "test-close-portal" &&
+                   std::getenv("ATTACLIP_NATIVE_TEST_PORTAL")) {
+            auto portal = std::atomic_load(&r.portalCapture);
+            if (!portal)
+              throw std::runtime_error("No portal session is active");
+            portal->closeSession();
+          }
+#endif
           else if (action == "exit")
             break;
           else if (action == "candidates") {
@@ -2115,6 +2178,11 @@ int main(int argc, char **argv) {
 #endif
 #ifdef __linux__
             captureError = r.captureAudioError();
+            if (attaclip::wayland::enabled()) {
+              auto portal = std::atomic_load(&r.portalCapture);
+              if (portal)
+                captureError = portal->health().message();
+            }
 #endif
             if (captureError.empty())
               captureError = r.additionalAudioError();
@@ -2151,6 +2219,9 @@ int main(int argc, char **argv) {
       }
     }
     obs_shutdown();
+#ifdef __linux__
+    obsShutdown.initialized = false;
+#endif
     return 0;
   } catch (const std::exception &e) {
     emit({{"event", "error"}, {"message", e.what()}});

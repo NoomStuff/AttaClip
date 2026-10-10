@@ -9,11 +9,17 @@ on:
          - scripts/build-recorder-macos.ts
          - scripts/smoke-macos.py
          - scripts/smoke-macos-audio.py
+         - scripts/smoke-macos-feedback.py
          - scripts/build-media-macos.sh
          - scripts/controlled-media-macos.ts
          - scripts/smoke-controlled-media-macos.py
          - scripts/probe-macos-source-runtime.py
          - scripts/collect-macos-electron.ts
+         - scripts/macos-*.ts
+         - scripts/verify-macos-release.ts
+         - scripts/package-macos-source-kit.ts
+         - scripts/package-macos-sources.py
+         - scripts/extract-macos-package.py
          - scripts/test-macos-packaged.ts
          - .github/workflows/native-macos.yml
 permissions:
@@ -21,7 +27,7 @@ permissions:
 jobs:
    capture:
       runs-on: macos-15
-      timeout-minutes: 90
+      timeout-minutes: 120
       steps:
          - uses: actions/checkout@v7
          - uses: oven-sh/setup-bun@v2
@@ -48,10 +54,18 @@ jobs:
            run: bun scripts/build-recorder-macos.ts
          - name: Compare actual provider binaries with official OBS and probe configuration
            run: DYLD_LIBRARY_PATH="$PWD/resources/recorder/Frameworks" python3 scripts/probe-macos-source-runtime.py
+         - name: Capture matching OBS sources and stage every full native license
+           run: |
+              bun scripts/macos-obs-sources.ts
+              bun scripts/macos-source-validation.ts
+         - name: Prepare Electron corresponding sources and full licenses before packaging
+           run: bun scripts/collect-macos-electron.ts --prepare
          - name: Verify actual screen and window recording with generated audio
            run: python3 scripts/smoke-macos.py
          - name: Verify extra application and system audio
            run: python3 scripts/smoke-macos-audio.py
+         - name: Verify native feedback focus, animation and capture behavior
+           run: python3 scripts/smoke-macos-feedback.py
          - name: Record native crash diagnostics
            if: failure()
            continue-on-error: true
@@ -65,13 +79,26 @@ jobs:
               bun run build:icons
               bun run build:notices
               bun run build
-              bunx electron-builder --mac --dir --publish never
+              bunx electron-builder --mac zip --arm64 --publish never
            env:
               CSC_IDENTITY_AUTO_DISCOVERY: "false"
          - name: Verify packaged application capture and sharing
            run: bun scripts/test-macos-packaged.ts
          - name: Capture matching Electron LGPL source evidence
            run: bun scripts/collect-macos-electron.ts
+         - name: Assemble and verify the frozen Mac source packet
+           run: |
+              bun scripts/macos-source-kit.ts
+              bun scripts/macos-source-kit.ts work/macos-release-sources --check
+              bun scripts/package-macos-source-kit.ts
+         - name: Verify the complete application ZIP, independent rebuild and updater
+           run: |
+              taskSource=$(find work -maxdepth 1 -name 'AttaClip-*-darwin-arm64-sources-*.zip' -type f)
+              taskApp=$(find release -maxdepth 1 -name 'AttaClip-*-mac-arm64.zip' -type f)
+              test -n "$taskSource" && test -n "$taskApp"
+              bun scripts/verify-macos-release.ts work/macos-release-sources "$taskSource" "$taskApp"
+           env:
+              CSC_IDENTITY_AUTO_DISCOVERY: "false"
          - uses: actions/upload-artifact@v7
            if: always()
            with:
@@ -96,6 +123,10 @@ jobs:
                  .cache/macos-audio/**/*.json
                  .cache/macos-audio/**/*.jsonl
                  .cache/macos-audio/**/*.log
+                 .cache/macos-feedback/**/*.json
+                 .cache/macos-feedback/**/*.jsonl
+                 .cache/macos-feedback/**/*.log
+                 .cache/macos-feedback/**/*-panel.png
                  .cache/macos-source/runtime-proof.json
                  work/controlled-media/macos-arm64/*.json
                  work/controlled-media/macos-arm64/*.txt
@@ -111,6 +142,11 @@ jobs:
                  work/release-sources/dependencies/*.tar.gz
                  work/release-sources/licenses/
                  work/macos-release-sources/electron-component.json
+                 work/macos-release-sources/macos-kit.json
+                 work/macos-release-sources/obs-source-validation.json
+                 work/AttaClip-*-darwin-arm64-sources-*.zip
+                 work/AttaClip-*-darwin-arm64-sources-*.zip.json
+                 release/*.zip.release.json
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.tar.gz
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.txt
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.json
@@ -118,4 +154,14 @@ jobs:
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.h
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/*.patch
                  work/macos-release-sources/evidence/electron-ffmpeg-darwin-arm64/licenses/
+              retention-days: 7
+         - uses: actions/upload-artifact@v7
+           if: always()
+           with:
+              name: macOS-native-feedback-proof
+              path: |
+                 .cache/macos-feedback/**/*.json
+                 .cache/macos-feedback/**/*.jsonl
+                 .cache/macos-feedback/**/*.log
+                 .cache/macos-feedback/**/*-panel.png
               retention-days: 7

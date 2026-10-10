@@ -19,6 +19,9 @@ if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Thi
 if (run("pkg-config", ["--modversion", "libobs"]).trim() !== version || run("dpkg-query", ["-W", "-f=${Version}", "obs-studio"]).trim() !== packageVersion)
    throw new Error(`Install the official OBS PPA package obs-studio=${packageVersion}. Headers and runtime must match ${version}`);
 const output = path.join(root, ".cache", "native-linux-build");
+run("python3", ["scripts/build-wayland-module.py"]);
+const waylandModule = path.join(root, ".cache/wayland-module-build/linux-pipewire.so");
+const waylandProvenance: unknown = JSON.parse(await readFile(path.join(root, ".cache/wayland-module-build/provenance.json"), "utf8"));
 run("cmake", ["-S", path.join(root, "native"), "-B", output, "-DCMAKE_BUILD_TYPE=Release"]);
 run("cmake", ["--build", output, "-j2"]);
 await rm(runtime, { recursive: true, force: true });
@@ -27,11 +30,11 @@ await mkdir(path.join(runtime, "obs-plugins"), { recursive: true });
 await copyFile(path.join(output, "attaclip-recorder"), path.join(runtime, "attaclip-recorder"));
 await copyFile("/usr/bin/obs-ffmpeg-mux", path.join(runtime, "obs-ffmpeg-mux"));
 const libraryRoot = "/usr/lib/x86_64-linux-gnu";
-const modules = ["linux-capture", "linux-pulseaudio", "obs-ffmpeg", "obs-nvenc", "obs-x264"];
+const modules = ["linux-capture", "linux-pulseaudio", "linux-pipewire", "obs-ffmpeg", "obs-nvenc", "obs-x264"];
 const initialFiles = [path.join(runtime, "attaclip-recorder"), "/usr/bin/obs-ffmpeg-mux", path.join(libraryRoot, "libobs-opengl.so")];
 await copyFile(path.join(libraryRoot, "libobs-opengl.so"), path.join(runtime, "lib", "libobs-opengl.so"));
 for (const name of modules) {
-   const module = path.join(libraryRoot, "obs-plugins", `${name}.so`);
+   const module = name === "linux-pipewire" ? waylandModule : path.join(libraryRoot, "obs-plugins", `${name}.so`);
    await copyFile(module, path.join(runtime, "obs-plugins", `${name}.so`));
    initialFiles.push(module);
    const data = path.join("/usr/share/obs/obs-plugins", name);
@@ -71,6 +74,11 @@ const sourceFiles = [
    "native/linux-app-audio.hpp",
    "native/linux-process.cpp",
    "native/linux-process.hpp",
+   "native/wayland/platform.cpp",
+   "native/wayland/platform.hpp",
+   "native/wayland/CMakeLists.txt",
+   "native/wayland/obs-pipewire-health.patch",
+   "scripts/build-wayland-module.py",
    "native/CMakeLists.txt",
    "scripts/build-native-linux.ts",
 ];
@@ -83,7 +91,8 @@ await writeFile(
          sourceCommit: "7546be7266dde276d82d4681fe1ab4fd8e32cf2b",
          source: "https://github.com/obsproject/obs-studio/tree/32.2.0",
          repository: "https://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu/",
-         platform: "Ubuntu 24.04 x64, X11",
+         platform: "Ubuntu 24.04 x64, X11 and Wayland screen portal",
+         waylandModule: waylandProvenance,
          modules,
          build: "scripts/build-native-linux.ts",
          recorder: {
@@ -105,7 +114,7 @@ await writeFile(
             )
          ),
          limitations: [
-            "Wayland capture unavailable",
+            "Wayland application and automatic game capture unavailable",
             "Exact-window CPU compatibility capture can increase recording cost",
             "Corresponding Ubuntu dependency sources must be collected before public binary distribution",
          ],
@@ -115,7 +124,5 @@ await writeFile(
    )
 );
 await cp("/usr/share/doc/obs-studio/copyright", path.join(runtime, "LICENSE-OBS"));
-const license = await fetch("https://raw.githubusercontent.com/obsproject/obs-studio/7546be7266dde276d82d4681fe1ab4fd8e32cf2b/COPYING");
-if (!license.ok) throw new Error("The pinned OBS license could not be retrieved");
-await writeFile(path.join(runtime, "COPYING-OBS"), await license.text());
-console.log(`Built Linux X11/PulseAudio recorder against exact OBS ${version}, staged ${libraries.size} ELF dependencies. ${runtime}`);
+await copyFile(path.join(root, ".cache/wayland-patched-source/COPYING"), path.join(runtime, "COPYING-OBS"));
+console.log(`Built Linux X11/Wayland/PulseAudio recorder against exact OBS ${version}, staged ${libraries.size} ELF dependencies. ${runtime}`);

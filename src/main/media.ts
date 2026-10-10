@@ -171,7 +171,13 @@ export async function encodeShareable(
    const height = Math.max(2, Math.floor(Math.min(info.height, maximumHeight) / 2) * 2);
    const common = [
       ...ffmpegBase,
+      "-filter_threads",
+      "1",
+      "-filter_complex_threads",
+      "1",
       "-y",
+      "-threads",
+      "2",
       "-i",
       source,
       "-map",

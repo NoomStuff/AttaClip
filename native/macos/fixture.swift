@@ -6,7 +6,9 @@ import CoreGraphics
 let evidencePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : nil
 let frequency = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2])! : 997
 precondition(frequency >= 100 && frequency <= 20000)
-let compact = CommandLine.arguments.count > 3 && CommandLine.arguments[3] == "compact"
+let mode = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
+let compact = mode == "compact"
+let fullscreenSpace = mode == "fullscreen"
 let evidenceOutput: FileHandle = try {
     guard let path = evidencePath else { return FileHandle.standardOutput }
     _ = FileManager.default.createFile(atPath: path, contents: nil)
@@ -29,15 +31,21 @@ final class PatternView: NSView {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let screen = NSScreen.main!.frame
-let frame = compact ? NSRect(x: screen.minX, y: screen.maxY - 120, width: 240, height: 120) : screen
+let frame = compact ? NSRect(x: screen.minX, y: screen.maxY - 120, width: 240, height: 120) : fullscreenSpace ? screen.insetBy(dx: 50, dy: 50) : screen
 let view = PatternView(frame: frame)
-let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+let mask: NSWindow.StyleMask = fullscreenSpace ? [.titled, .closable, .resizable, .miniaturizable] : [.borderless]
+let window = NSWindow(contentRect: frame, styleMask: mask, backing: .buffered, defer: false)
 window.title = compact ? "Mac audio decoy" : "Mac capture fixture"
 window.backgroundColor = .black
 window.contentView = view
 window.level = .normal
 window.orderFrontRegardless()
 app.activate(ignoringOtherApps: true)
+if fullscreenSpace {
+    window.collectionBehavior = [.fullScreenPrimary]
+    window.makeKeyAndOrderFront(nil)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { window.toggleFullScreen(nil) }
+}
 let engine = AVAudioEngine()
 var phase = 0.0
 let renderLock = NSLock()
@@ -70,7 +78,9 @@ do {
 }
 let result: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "windowId": window.windowNumber, "displayId": CGMainDisplayID(), "audioStarted": audio,
     "screenPermission": CGPreflightScreenCaptureAccess(), "microphoneAuthorization": AVCaptureDevice.authorizationStatus(for: .audio).rawValue,
-    "frequency": frequency, "bundleIdentifier": Bundle.main.bundleIdentifier ?? ""]
+    "frequency": frequency, "bundleIdentifier": Bundle.main.bundleIdentifier ?? "",
+    "screenFrame": ["x": screen.minX, "y": screen.minY, "width": screen.width, "height": screen.height],
+    "displayPixels": ["width": CGDisplayPixelsWide(CGMainDisplayID()), "height": CGDisplayPixelsHigh(CGMainDisplayID())]]
 let json = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
 evidenceOutput.write(json + Data([10]))
 let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
@@ -87,7 +97,8 @@ let healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ i
     let frames = renderedFrames
     renderLock.unlock()
     let health: [String: Any] = ["event": "audio-health", "engineRunning": engine.isRunning, "renderedFrames": frames,
-        "visualCount": view.count, "bundleIdentifier": Bundle.main.bundleIdentifier ?? "", "foreground": app.isActive]
+        "visualCount": view.count, "bundleIdentifier": Bundle.main.bundleIdentifier ?? "", "foreground": app.isActive,
+        "fullscreenSpace": window.styleMask.contains(.fullScreen)]
     if let data = try? JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]) {
         evidenceOutput.write(data + Data([10]))
     }
