@@ -114,7 +114,7 @@ export async function verifyMacRelease(project: string, directory: string, sourc
    execFileSync("bun", ["run", "build:icons"], { cwd: appProject, stdio: "inherit", timeout: 180000 });
    execFileSync("bun", ["run", "build:notices"], { cwd: appProject, stdio: "inherit", timeout: 180000 });
    compareMacTrees(kit.staged, await macTree(path.join(appProject, "resources")), "Independently generated runtime notices");
-   execFileSync("bunx", ["--no-install", "electron-builder", "--mac", "--dir", "--arm64", "--publish", "never"], {
+   execFileSync("bunx", ["--no-install", "electron-builder", "--mac", "zip", "--arm64", "--publish", "never"], {
       cwd: appProject,
       stdio: "inherit",
       env: { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: "false" },
@@ -127,6 +127,10 @@ export async function verifyMacRelease(project: string, directory: string, sourc
    const independentApp = path.join(appProject, "release/mac-arm64/AttaClip.app");
    const expected = await macTree(independentApp);
    const actual = await macTree(actualApp);
+   const diagnostics = path.join(project, ".cache/macos-source");
+   await mkdir(diagnostics, { recursive: true });
+   await writeFile(path.join(diagnostics, "independent-application-tree.json"), `${JSON.stringify(expected, null, 2)}\n`);
+   await writeFile(path.join(diagnostics, "actual-application-tree.json"), `${JSON.stringify(actual, null, 2)}\n`);
    // No signature fields, load commands, executable bytes or unknown files
    // are exempted. A signing difference needs a separate captured proof.
    compareMacTrees(expected, actual, "Complete independently packaged application");

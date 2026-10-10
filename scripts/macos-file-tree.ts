@@ -41,8 +41,10 @@ export async function macTree(root: string): Promise<MacTreeEntry[]> {
 export function compareMacTrees(expected: MacTreeEntry[], actual: MacTreeEntry[], label: string): void {
    const left = new Map(expected.map((entry) => [entry.path, entry]));
    const right = new Map(actual.map((entry) => [entry.path, entry]));
-   if (left.size !== expected.length || right.size !== actual.length || left.size !== right.size)
-      throw new Error(`${label}: missing, extra or duplicate files`);
+   if (left.size !== expected.length || right.size !== actual.length) throw new Error(`${label}: duplicate files`);
+   const missing = [...left.keys()].filter((name) => !right.has(name));
+   const extra = [...right.keys()].filter((name) => !left.has(name));
+   if (missing.length || extra.length) throw new Error(`${label}: missing ${JSON.stringify(missing)}, extra ${JSON.stringify(extra)}`);
    for (const [name, value] of left) {
       const other = right.get(name);
       if (!other || value.kind !== other.kind) throw new Error(`${label}: changed member ${name}`);

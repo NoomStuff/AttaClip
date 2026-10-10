@@ -128,6 +128,7 @@ jobs:
                  .cache/macos-feedback/**/*.log
                  .cache/macos-feedback/**/*-panel.png
                  .cache/macos-source/runtime-proof.json
+                 .cache/macos-source/*-application-tree.json
                  work/controlled-media/macos-arm64/*.json
                  work/controlled-media/macos-arm64/*.txt
                  work/controlled-media/macos-arm64/*.log
