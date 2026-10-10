@@ -139,8 +139,12 @@ def start_capture(identity, kind):
 
 
 def motion_evidence(request, identity, reduced, leaving=False):
-    samples = [event for event in events["notifier"] if event.get("id") == request and event["event"] == "animation"
-               and (event["elapsed"] >= 2.4 if leaving else event["elapsed"] <= 0.25)]
+    # A delayed timer can report its final shown/hidden state outside the short
+    # animation-sampling interval. That real native endpoint still counts.
+    endpoint = "hidden" if leaving else "shown"
+    samples = [event for event in events["notifier"] if event.get("id") == request and
+               (event["event"] == endpoint or event["event"] == "animation" and
+                (event["elapsed"] >= 2.4 if leaving else event["elapsed"] <= 0.25))]
     assert len(samples) >= 3, samples
     assert all(not event["active"] and not event["key"] and not event["main"] and
                event["foregroundPID"] == identity["pid"] and event["reducedMotion"] == reduced for event in samples), samples

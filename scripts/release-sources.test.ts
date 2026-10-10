@@ -4,9 +4,56 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe, it, expect } from "vitest";
-import { hashFile, hashTarContents, inventory, releaseInventory, validateKit, sourcePins, dependencyClosure, type SourceKit } from "./release-sources.ts";
+import {
+   validateRecorderBuild,
+   hashFile,
+   hashTarContents,
+   inventory,
+   releaseInventory,
+   validateKit,
+   sourcePins,
+   dependencyClosure,
+   type SourceKit,
+} from "./release-sources.ts";
 
 describe("release source evidence", () => {
+   it("requires matching native notifier source and binary before accepting an owned OBS runtime helper", async () => {
+      const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-native-provenance-"));
+      try {
+         const inputs = [
+            "native/recorder.cpp",
+            "native/CMakeLists.txt",
+            "scripts/build-native.ts",
+            "native/notifications/windows.cpp",
+            "native/notifications/CMakeLists.txt",
+         ];
+         const sourceHashes: Record<string, string> = {};
+         for (const input of inputs) {
+            const absolute = path.join(folder, input);
+            await mkdir(path.dirname(absolute), { recursive: true });
+            await writeFile(absolute, input);
+            sourceHashes[input] = await hashFile(absolute);
+         }
+         const staged = [
+            { path: "recorder/attaclip-recorder.exe", sha256: "recorder-build", size: 1 },
+            { path: "recorder/attaclip-notifier.exe", sha256: "notifier-build", size: 1 },
+         ];
+         const provenance = { sourceHashes, binaryHashes: { "attaclip-recorder.exe": "recorder-build", "attaclip-notifier.exe": "notifier-build" } };
+         expect(await validateRecorderBuild(provenance, staged, folder)).toEqual([]);
+         staged[1]!.sha256 = "unrelated-binary";
+         expect(await validateRecorderBuild(provenance, staged, folder)).toContain("Recorder helper binary hash absent or stale: attaclip-notifier.exe");
+         staged[1]!.sha256 = "notifier-build";
+         await writeFile(path.join(folder, "native/notifications/windows.cpp"), "different source");
+         expect(await validateRecorderBuild(provenance, staged, folder)).toContain(
+            "Recorder build-input hash absent or stale: native/notifications/windows.cpp"
+         );
+         expect(await validateRecorderBuild(provenance, staged.slice(0, 1), folder)).toContain(
+            "Recorder helper binary hash absent or stale: attaclip-notifier.exe"
+         );
+      } finally {
+         await rm(folder, { recursive: true, force: true });
+      }
+   });
    it("includes Electron's shared FFmpeg module in the release digest", async () => {
       const folder = await mkdtemp(path.join(os.tmpdir(), "attaclip-electron-source-"));
       try {

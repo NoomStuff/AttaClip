@@ -20,6 +20,20 @@ def run(args):
     return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
 
 
+def include_copyright_owners(groups, docs=Path("/usr/share/doc")):
+    pending = list(groups)
+    for owner, _version in pending:
+        notice = docs / owner.split(":", 1)[0] / "copyright"
+        if not notice.exists():
+            continue
+        notice_owner = run(["dpkg-query", "-S", str(notice.resolve())]).split(": ", 1)[0]
+        fields = paragraphs(run(["dpkg-query", "-s", notice_owner]))[0]
+        key = notice_owner, fields["Version"]
+        if key not in groups:
+            groups[key] = []
+            pending.append(key)
+
+
 def digest(file):
     with open(file, "rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -378,6 +392,7 @@ def collect(args):
                 notice_owner = run(["dpkg-query", "-S", str(notice.resolve())]).split(": ", 1)[0]
                 notice_fields = paragraphs(run(["dpkg-query", "-s", notice_owner]))[0]
                 groups.setdefault((notice_owner, notice_fields["Version"]), [])
+    include_copyright_owners(groups)
     for (owner, version), files in sorted(groups.items()):
         print(f"Capture {owner}={version}, {len(files)} files", flush=True)
         try:

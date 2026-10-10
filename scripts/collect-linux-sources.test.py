@@ -4,6 +4,8 @@ from pathlib import Path
 import tarfile
 import hashlib
 import unittest
+from unittest.mock import patch
+import tempfile
 
 spec = importlib.util.spec_from_file_location("collector", Path(__file__).with_name("collect-linux-sources.py"))
 collector = importlib.util.module_from_spec(spec)
@@ -11,6 +13,24 @@ spec.loader.exec_module(collector)
 
 
 class SourceEvidenceTest(unittest.TestCase):
+    def test_compiler_only_packages_include_their_notice_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            docs = Path(temporary)
+            base = docs / "gcc-13-base"
+            base.mkdir()
+            (base / "copyright").write_text("compiler license")
+            (docs / "gcc-13").symlink_to(base, target_is_directory=True)
+            groups = {("gcc-13", "13.3"): []}
+
+            def query(args):
+                if args[1] == "-S":
+                    return f"gcc-13-base:amd64: {args[2]}\n"
+                return "Package: gcc-13-base\nVersion: 13.3\n"
+
+            with patch.object(collector, "run", side_effect=query):
+                collector.include_copyright_owners(groups, docs)
+            self.assertEqual(groups, {("gcc-13", "13.3"): [], ("gcc-13-base:amd64", "13.3"): []})
+
     def test_source_version_preserves_epoch_and_binary_revision_difference(self):
         record = collector.paragraphs("Package: libfoo\nVersion: 2:1.2-4build1\nSource: foo (2:1.2-4)\nChecksums-Sha256:\n abc 3 foo.tar.xz\n def 4 foo.dsc\n")[0]
         self.assertEqual(collector.source_identity(record), ("foo", "2:1.2-4"))

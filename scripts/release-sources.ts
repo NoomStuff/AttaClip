@@ -88,6 +88,30 @@ export const sourcePins: SourcePin[] = [
    { name: "obs-mbedtls-framework", repository: "Mbed-TLS/mbedtls-framework", commit: "2a3e2c5ea053c14b745dbdf41f609b1edc6a72fa" },
 ];
 
+interface RecorderBuildProvenance {
+   sourceHashes?: Record<string, string>;
+   binaryHashes?: Record<string, string>;
+}
+
+export async function validateRecorderBuild(parsed: RecorderBuildProvenance, staged: HashedFile[], project: string): Promise<string[]> {
+   const blockers: string[] = [];
+   const ownBinaries = ["attaclip-recorder.exe"];
+   const inputs = ["native/recorder.cpp", "native/CMakeLists.txt", "scripts/build-native.ts"];
+   if (staged.some((file) => file.path === "recorder/attaclip-notifier.exe") || parsed.sourceHashes?.["native/notifications/windows.cpp"]) {
+      ownBinaries.push("attaclip-notifier.exe");
+      inputs.push("native/notifications/windows.cpp", "native/notifications/CMakeLists.txt");
+   }
+   for (const file of inputs) {
+      if (!existsSync(path.join(project, file)) || parsed.sourceHashes?.[file] !== (await hashFile(path.join(project, file))))
+         blockers.push(`Recorder build-input hash absent or stale: ${file}`);
+   }
+   for (const name of ownBinaries) {
+      const helper = staged.find((file) => file.path === `recorder/${name}`);
+      if (!helper || parsed.binaryHashes?.[name] !== helper.sha256) blockers.push(`Recorder helper binary hash absent or stale: ${name}`);
+   }
+   return blockers;
+}
+
 export async function hashFile(file: string): Promise<string> {
    const hash = createHash("sha256");
    for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
@@ -655,12 +679,7 @@ export async function collectKit(project: string, destination: string, downloadS
       };
       if (parsed.runtimeArchive?.sha256 !== "4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1")
          blockers.push("Recorder provenance does not identify the hash-verified official runtime archive.");
-      for (const file of ["native/recorder.cpp", "native/CMakeLists.txt", "scripts/build-native.ts"]) {
-         if (!existsSync(path.join(project, file)) || parsed.sourceHashes?.[file] !== (await hashFile(path.join(project, file))))
-            blockers.push(`Recorder build-input hash absent or stale: ${file}`);
-      }
-      const helper = staged.find((file) => file.path === "recorder/attaclip-recorder.exe");
-      if (!helper || parsed.binaryHashes?.["attaclip-recorder.exe"] !== helper.sha256) blockers.push("Recorder helper binary hash absent or stale.");
+      blockers.push(...(await validateRecorderBuild(parsed, staged, project)));
    } catch {
       blockers.push("Recorder provenance is missing or invalid.");
    }
@@ -670,7 +689,8 @@ export async function collectKit(project: string, destination: string, downloadS
       run("tar", ["-xf", obsArchive, "-C", verifiedRuntime]);
       for (const file of staged.filter((file) => file.path.startsWith("recorder/"))) {
          const relative = file.path.substring("recorder/".length);
-         if (relative === "attaclip-recorder.exe" || relative === "provenance.json" || relative.startsWith("LICENSE-")) continue;
+         if (relative === "attaclip-recorder.exe" || relative === "attaclip-notifier.exe" || relative === "provenance.json" || relative.startsWith("LICENSE-"))
+            continue;
          const official = path.join(verifiedRuntime, relative.includes("/") ? relative : path.posix.join("bin/64bit", relative));
          if (!existsSync(official) || (await hashFile(official)) !== file.sha256)
             blockers.push(`Staged OBS runtime file does not match the official archive: ${relative}`);
