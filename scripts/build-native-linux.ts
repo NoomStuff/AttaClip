@@ -38,7 +38,8 @@ for (const name of modules) {
    await copyFile(module, path.join(runtime, "obs-plugins", `${name}.so`));
    initialFiles.push(module);
    const data = path.join("/usr/share/obs/obs-plugins", name);
-   if (existsSync(data)) await cp(data, path.join(runtime, "data/obs-plugins", name), { recursive: true });
+   if (existsSync(data))
+      await cp(data, path.join(runtime, "data/obs-plugins", name), { recursive: true, filter: (file) => path.basename(file) !== ".gitkeep" });
 }
 await cp("/usr/share/obs/libobs", path.join(runtime, "data/libobs"), { recursive: true });
 const recorded: Array<{ path: string; sha256: string; package: string }> = [];
