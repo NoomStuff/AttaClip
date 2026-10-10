@@ -40,6 +40,11 @@ struct AudioTarget {
 std::unordered_map<obs_source_t *, CaptureHealth *> audioHealth;
 std::unordered_map<obs_source_t *, AudioTarget> audioTargets;
 InputHealth inputHealth;
+std::unordered_map<obs_source_t *, std::unique_ptr<InputDelivery>> inputDelivery;
+
+void inputFrames(void *value, obs_source_t *, const struct audio_data *audio, bool) {
+  if (audio) static_cast<InputDelivery *>(value)->delivered(audio->frames, InputDelivery::Clock::now());
+}
 
 std::string text(CFStringRef value) {
   if (!value) return {};
@@ -275,6 +280,26 @@ void requireMicrophonePermission() {
     throw std::runtime_error("Allow AttaClip microphone access in System Settings before recording your microphone");
 }
 
+void watchInput(obs_source_t *source) {
+  if (!source || std::string(obs_source_get_id(source)) != "coreaudio_input_capture") return;
+  std::lock_guard<std::mutex> lock(availabilityMutex);
+  if (inputDelivery.count(source)) return;
+  auto state = std::make_unique<InputDelivery>(InputDelivery::Clock::now());
+  auto *callbackState = state.get();
+  inputDelivery.emplace(source, std::move(state));
+  obs_source_add_audio_capture_callback(source, inputFrames, callbackState);
+}
+
+void forgetInput(obs_source_t *source) {
+  std::lock_guard<std::mutex> lock(availabilityMutex);
+  auto found = inputDelivery.find(source);
+  if (found == inputDelivery.end()) return;
+  // OBS holds audio_cb_mutex while invoking callbacks. Removal acquires that
+  // same mutex, so no callback can still access state when we destroy it.
+  obs_source_remove_audio_capture_callback(source, inputFrames, found->second.get());
+  inputDelivery.erase(found);
+}
+
 namespace {
 obs_source_t *audioSource(obs_data_t *settings, const std::string &name) {
   if (!CGPreflightScreenCaptureAccess()) {
@@ -349,7 +374,7 @@ std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid) {
     const std::string device = obs_data_get_string(settings, "device_id");
     obs_data_release(settings);
     std::lock_guard<std::mutex> lock(availabilityMutex);
-    return inputHealth.error(device, std::chrono::steady_clock::now(), [] {
+    auto error = inputHealth.error(device, std::chrono::steady_clock::now(), [] {
       return [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusAuthorized;
     }, [] {
       std::vector<std::string> devices;
@@ -361,6 +386,10 @@ std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid) {
       if (properties) obs_properties_destroy(properties);
       return devices;
     });
+    if (!error.empty()) return error;
+    auto delivery = inputDelivery.find(source);
+    if (delivery == inputDelivery.end()) return "The microphone audio could not be checked. Stop recording and select the input again";
+    return delivery->second->error(InputDelivery::Clock::now());
   }
   if (std::string(type) != "sck_audio_capture") return {};
   std::lock_guard<std::mutex> lock(availabilityMutex);

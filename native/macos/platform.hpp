@@ -19,6 +19,8 @@ std::string captureError();
 nlohmann::json candidates();
 bool foregroundFullscreen();
 void requireMicrophonePermission();
+void watchInput(obs_source_t *source);
+void forgetInput(obs_source_t *source);
 obs_source_t *createApplicationAudio(uintptr_t window, int64_t pid, const std::string &name);
 obs_source_t *createSystemAudio(const std::string &name);
 std::string audioError(obs_source_t *source, uintptr_t window, int64_t pid);

@@ -552,8 +552,12 @@ public:
           destroyApplicationAudio(extra.application);
         else
 #endif
-            if (extra.source)
+            if (extra.source) {
+#ifdef __APPLE__
+          attaclip::macos::forgetInput(extra.source);
+#endif
           obs_source_release(extra.source);
+        }
       }
       additionalAudio.clear();
       audioNames.clear();
@@ -578,6 +582,9 @@ public:
       desktop = nullptr;
     }
     if (mic) {
+#ifdef __APPLE__
+      attaclip::macos::forgetInput(mic);
+#endif
       obs_source_release(mic);
       mic = nullptr;
     }
@@ -677,7 +684,7 @@ public:
     return attaclip::macos::targetAvailable(targetWindow.load());
 #endif
 #ifdef __linux__
-    if (attaclip::wayland::enabled()) {
+    if (attaclip::wayland::enabled() && screenCapture) {
       auto portal = std::atomic_load(&portalCapture);
       return portal && portal->health().working();
     }
@@ -946,7 +953,10 @@ public:
         obs_source_set_audio_mixers(extra.source, mask);
       }
 #ifdef __APPLE__
-      if (extra.source) obs_source_set_audio_mixers(extra.source, mask);
+      if (extra.source) {
+        obs_source_set_audio_mixers(extra.source, mask);
+        attaclip::macos::watchInput(extra.source);
+      }
 #endif
       additionalAudio.push_back(std::move(extra));
 #ifdef __linux__
@@ -1322,13 +1332,20 @@ public:
   }
   void source(const json &c) {
     std::string kind = c.value("sourceKind", "screen");
-#ifdef __linux__
-    if (attaclip::wayland::enabled() &&
-        (kind != "screen" || c.value("sourceId", "") != "portal:screen"))
-      throw std::runtime_error("Wayland recording requires the system screen picker. Application and automatic capture are unavailable");
-#endif
     if (kind == "auto")
       kind = c.value("resolvedKind", "waiting");
+#ifdef __linux__
+    if (attaclip::wayland::enabled()) {
+      if (kind == "screen" && c.value("sourceId", "") != "portal:screen")
+        throw std::runtime_error(
+            "Wayland screen recording requires the system screen picker");
+      if (kind != "screen" &&
+          (!candidateConnection ||
+           xcb_connection_has_error(candidateConnection)))
+        throw std::runtime_error(
+            "XWayland application capture is unavailable in this session");
+    }
+#endif
     if (kind == "waiting") {
       captureEnabled = false;
       gameCapture = false;
@@ -1509,7 +1526,7 @@ public:
 #elif defined(__APPLE__)
     next = attaclip::macos::createCapture(c);
 #elif defined(__linux__)
-    if (attaclip::wayland::enabled()) {
+    if (attaclip::wayland::enabled() && kind == "screen") {
       nextPortal = attaclip::wayland::createScreen();
       next = obs_source_get_ref(nextPortal->source());
     } else if (kind == "app") {
@@ -1533,8 +1550,11 @@ public:
           std::to_string(window) + "\r\n" + name + "\r\n" + klass;
       obs_data_set_string(s, "capture_window", identity.c_str());
       obs_data_set_bool(s, "show_cursor", true);
-      captureTextureFailure = false;
-      next = createCaptureSource("xcomposite_input", s);
+      // OBS's XComposite texture import uses GLX. A Wayland output uses EGL,
+      // so read this application's own pixmap through the CPU source instead.
+      captureTextureFailure = attaclip::wayland::enabled();
+      next = captureTextureFailure ? nullptr
+                                   : createCaptureSource("xcomposite_input", s);
       if (captureTextureFailure) {
         obs_source_release(next);
         obs_wait_for_destroy_queue();
@@ -1556,8 +1576,10 @@ public:
         emit({{"event", "capture-method"},
               {"method", "compatibility"},
               {"reason",
-               "Application capture uses CPU compatibility mode because this "
-               "graphics driver cannot import its window texture"}});
+               attaclip::wayland::enabled()
+                   ? "XWayland application capture uses CPU compatibility mode"
+                   : "Application capture uses CPU compatibility mode because "
+                     "this graphics driver cannot import its window texture"}});
       }
     } else if (kind == "screen") {
       int screen = c.value("screenIndex", 0);
@@ -1702,7 +1724,7 @@ public:
       sourceName = c.value("sourceName", "Screen");
       selectedSourceId = c.value("sourceId", "");
 #ifdef __linux__
-      if (attaclip::wayland::enabled())
+      if (attaclip::wayland::enabled() && screenCapture)
         sourceName = "Portal-selected screen";
 #endif
     }
@@ -1819,6 +1841,9 @@ public:
       obs_data_release(d);
       if (!mic)
         throw std::runtime_error("The microphone could not be opened");
+#ifdef __APPLE__
+      attaclip::macos::watchInput(mic);
+#endif
       obs_source_set_audio_mixers(mic, 5);
       obs_set_output_source(2, mic);
       obs_source_set_volume(mic, microphoneVolume);
@@ -1919,6 +1944,8 @@ int main(int argc, char **argv) {
     sigaddset(&brokenPipe, SIGPIPE);
     if (pthread_sigmask(SIG_BLOCK, &brokenPipe, nullptr) != 0)
       throw std::runtime_error("Could not configure recorder pipe handling");
+    if (!XInitThreads())
+      throw std::runtime_error("X11 thread initialization failed");
     auto waylandPlatform = std::make_unique<attaclip::wayland::Platform>();
     struct ObsShutdown {
       bool initialized = false;
@@ -1927,8 +1954,6 @@ int main(int argc, char **argv) {
           obs_shutdown();
       }
     } obsShutdown;
-    if (!attaclip::wayland::enabled() && !XInitThreads())
-      throw std::runtime_error("X11 thread initialization failed");
 #endif
     base_set_log_handler(logger, nullptr);
 #ifdef _WIN32
@@ -1965,9 +1990,15 @@ int main(int argc, char **argv) {
         throw std::runtime_error("The X11 display could not be opened");
       obs_set_nix_platform(OBS_NIX_PLATFORM_X11_EGL);
       obs_set_nix_platform_display(display);
+    }
+    if (std::getenv("DISPLAY") && *std::getenv("DISPLAY")) {
       candidateConnection = xcb_connect(nullptr, nullptr);
-      if (xcb_connection_has_error(candidateConnection))
-        throw std::runtime_error("X11 application identity connection failed");
+      if (xcb_connection_has_error(candidateConnection)) {
+        xcb_disconnect(candidateConnection);
+        candidateConnection = nullptr;
+        if (!attaclip::wayland::enabled())
+          throw std::runtime_error("X11 application identity connection failed");
+      }
     }
     muxExecutable = (root / "obs-ffmpeg-mux").string();
 #endif
@@ -2067,6 +2098,12 @@ int main(int argc, char **argv) {
       if (attaclip::wayland::enabled()) {
         ready["captureBackend"] = "wayland-portal";
         ready["sourceKinds"] = json::array({"screen"});
+        if (candidateConnection &&
+            !xcb_connection_has_error(candidateConnection)) {
+          ready["sourceKinds"].push_back("app");
+          ready["sourceKinds"].push_back("auto");
+          ready["applicationBackend"] = "xwayland";
+        }
         ready["portalPicker"] = true;
       }
 #endif
@@ -2178,7 +2215,7 @@ int main(int argc, char **argv) {
 #endif
 #ifdef __linux__
             captureError = r.captureAudioError();
-            if (attaclip::wayland::enabled()) {
+            if (attaclip::wayland::enabled() && r.screenCapture) {
               auto portal = std::atomic_load(&r.portalCapture);
               if (portal)
                 captureError = portal->health().message();

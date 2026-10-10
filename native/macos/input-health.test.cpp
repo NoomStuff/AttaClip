@@ -41,5 +41,23 @@ int main() {
   assert(inventoryReads == 3);
   devices.clear();
   assert(check("default", 3000).find("unavailable") != std::string::npos);
+  auto at = [](int ms) { return InputHealth::Clock::time_point(std::chrono::milliseconds(ms)); };
+  attaclip::macos::InputDelivery delivery(at(0));
+  assert(delivery.error(at(0)).empty());
+  assert(delivery.error(at(1999)).empty());
+  assert(delivery.error(at(2000)).find("not started") != std::string::npos);
+  // Empty callbacks cannot pretend a disconnected AudioUnit recovered.
+  delivery.delivered(0, at(2100));
+  assert(!delivery.error(at(2200)).empty());
+  // Frames count regardless of amplitude, gain or mute. A quiet microphone is
+  // healthy; waiting for a nonzero peak would reject ordinary silence.
+  delivery.delivered(480, at(2300));
+  assert(delivery.error(at(2300)).empty());
+  assert(delivery.error(at(4299)).empty());
+  assert(delivery.error(at(4300)).find("stopped") != std::string::npos);
+  delivery.delivered(480, at(4400));
+  assert(delivery.error(at(4400)).empty());
+  assert(delivery.error(at(6399)).empty());
+  assert(!delivery.error(at(6400)).empty());
   std::cout << "Mac microphone permission, device loss, recovery and bounded polling policy passed\n";
 }
