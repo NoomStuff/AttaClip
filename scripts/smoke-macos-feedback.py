@@ -24,6 +24,8 @@ children = []
 logs = []
 fixture_paths = []
 ffmpeg = str(root / "resources/media/ffmpeg")
+width, height = 640, 360
+media_threads = ["-threads", "1", "-filter_threads", "1"]
 
 
 def launch(args, name, pipe=False):
@@ -88,8 +90,8 @@ def start_capture(identity, kind):
     index = len(events["recorder"])
     source = f"screen:{identity['displayId']}:0" if kind == "screen" else f"window:{identity['windowId']}:0"
     command(dict(action="start", sourceKind=kind, sourceId=source, displayId=str(identity["displayId"]),
-                 sourceName="Synthetic feedback fixture", quality="custom", customWidth=1280,
-                 customHeight=720, customFPS=15, customCQ=23, clipSeconds=2,
+                 sourceName="Synthetic feedback fixture", quality="custom", customWidth=width,
+                 customHeight=height, customFPS=15, customCQ=23, clipSeconds=2,
                  captureAudio=False, microphone=False, allowSoftwareEncoder=True))
     return wait("recorder", lambda event: event in events["recorder"][index:] and event["event"] == "recording")
 
@@ -117,13 +119,13 @@ def save(label, stop=True):
     assert result["event"] == "saved", result
     if stop:
         command(dict(action="stop"))
-    subprocess.run([ffmpeg, "-v", "error", "-i", str(output), "-map", "0", "-f", "null", "-"], check=True)
+    subprocess.run([ffmpeg, "-v", "error", *media_threads, "-i", str(output), "-map", "0", "-f", "null", "-"], check=True)
     return output
 
 
 def pixels(output, x, y):
-    raw = subprocess.run([ffmpeg, "-v", "error", "-i", str(output), "-vf", f"crop=2:2:{x}:{y},scale=1:1",
-                          "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+    raw = subprocess.run([ffmpeg, "-v", "error", *media_threads, "-i", str(output), "-vf", f"crop=2:2:{x}:{y},scale=1:1",
+                          "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-threads", "1", "-f", "rawvideo", "-"],
                          check=True, capture_output=True).stdout
     assert len(raw) >= 30 and len(raw) % 3 == 0, "No complete feedback capture frames"
     return [list(raw[index:index + 3]) for index in range(0, len(raw), 3)]
@@ -133,14 +135,14 @@ def capture_evidence(output, identity, shown):
     screen = identity["screenFrame"]
     # OBS fits the whole source into a fixed output. Map a blank patch inside the
     # actual Cocoa panel to video pixels, away from the icon, text and corners.
-    scale = min(1280 / screen["width"], 720 / screen["height"])
-    offset_x = (1280 - screen["width"] * scale) / 2
-    offset_y = (720 - screen["height"] * scale) / 2
+    scale = min(width / screen["width"], height / screen["height"])
+    offset_x = (width - screen["width"] * scale) / 2
+    offset_y = (height - screen["height"] * scale) / 2
     x = int(offset_x + (shown["x"] + 180 - screen["x"]) * scale)
     y = int(offset_y + (screen["y"] + screen["height"] - shown["y"] - 14) * scale)
     sampled = pixels(output, x, y)
     dark = sum(all(abs(pixel[index] - value) <= 18 for index, value in enumerate((25, 23, 31))) for pixel in sampled)
-    middle = pixels(output, 640, 360)
+    middle = pixels(output, width // 2, height // 2)
     colors = ((228, 76, 102), (65, 184, 170))
     classes = [next((index for index, color in enumerate(colors) if all(abs(pixel[channel] - color[channel]) <= 22 for channel in range(3))), None) for pixel in middle]
     assert None not in classes and set(classes) == {0, 1}, "Capture did not contain the actual changing selected fixture"
